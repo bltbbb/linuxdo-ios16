@@ -116,6 +116,16 @@ struct NetworkSettingsView: View {
                         Label("清空并恢复默认", systemImage: "trash")
                     }
                 }
+                Section {
+                    HStack {
+                        Text("版本")
+                        Spacer()
+                        Text(Self.versionText)
+                            .foregroundColor(.secondary)
+                    }
+                } footer: {
+                    Text("看不到「安装根证书」说明装的是旧包，请从 Releases 重新安装最新版。")
+                }
             }
             .sheet(item: $shareItem) { item in
                 ActivityView(url: item.url)
@@ -159,6 +169,12 @@ struct NetworkSettingsView: View {
     }
 
     // MARK: - 其它
+
+    private static var versionText: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
+    }
 
     private func runDiagnose() {
         testing = true
