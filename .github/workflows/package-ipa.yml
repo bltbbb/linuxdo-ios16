@@ -100,6 +100,13 @@ jobs:
           mkdir -p build/Payload
           cp -R "$APP" build/Payload/
 
+          # 无证书时做 ad-hoc 伪签名：TrollStore / 越狱环境可直接安装。
+          # 完全未签名的 Mach-O 会被部分安装器判为损坏包。
+          if [ -z "${BUILD_CERTIFICATE_BASE64:-}" ]; then
+            echo "== ad-hoc 伪签名（TrollStore 可直接安装） =="
+            codesign -f -s - --timestamp=none --generate-entitlement-der build/Payload/LinuxDoClient.app
+          fi
+
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
           OUT="LinuxDoClient-${VERSION}-unsigned.ipa"
           ( cd build && zip -qry "../$OUT" Payload )
