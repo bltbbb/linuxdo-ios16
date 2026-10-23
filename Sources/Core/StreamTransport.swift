@@ -125,10 +125,12 @@ enum StreamTransport {
     }
 
     /// 手动校验证书链：SNI 带尾点，但比对用的是去掉尾点的规范域名。
+    ///
+    /// `kCFStreamPropertySSLPeerCertificates` 在 Swift 里被标成不可用，
+    /// 但 CFNetwork 的流属性是按字符串匹配的，所以直接传这个键名。
     private static func verifyPeer(_ stream: CFReadStream, host: String) throws {
-        guard let raw = CFReadStreamCopyProperty(
-            stream, CFStreamPropertyKey(rawValue: kCFStreamPropertySSLPeerCertificates)
-        ),
+        let peerKey = CFStreamPropertyKey(rawValue: "kCFStreamPropertySSLPeerCertificates" as CFString)
+        guard let raw = CFReadStreamCopyProperty(stream, peerKey),
               let certificates = raw as? [SecCertificate],
               !certificates.isEmpty else {
             throw StreamError.tls("服务器没有提供证书")
