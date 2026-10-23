@@ -80,10 +80,15 @@ enum StreamTransport {
             output.close()
         }
 
+        // 交给 CFNetwork 自己做证书校验。
+        //
+        // SNI 用带尾点的 linux.do.：本地链路对 linux.do 做精确匹配并回 RST，
+        // 尾点不在名单里；RFC 6125 允许尾点，Cloudflare 返回的仍是 linux.do 的证书，
+        // 而 SecureTransport 比对主机名时会规范化尾点，所以证书校验照常生效。
         let settings: [String: Any] = [
             kCFStreamSSLLevel as String: kCFStreamSocketSecurityLevelNegotiatedSSL as String,
             kCFStreamSSLPeerName as String: host + ".",
-            kCFStreamSSLValidatesCertificateChain as String: false
+            kCFStreamSSLValidatesCertificateChain as String: true
         ]
         CFReadStreamSetProperty(
             rawRead, CFStreamPropertyKey(rawValue: kCFStreamPropertySSLSettings), settings as CFDictionary
@@ -94,7 +99,6 @@ enum StreamTransport {
         input.open()
         output.open()
         try waitUntilOpen(input, output, deadline: deadline)
-        try verifyPeer(rawRead, host: host)
 
         try write(DirectTransport.serialize(request, url: url, host: host), to: output, deadline: deadline)
         let raw = try readAll(from: input, deadline: deadline)
@@ -122,32 +126,6 @@ enum StreamTransport {
     private static func reason(_ stream: Stream) -> String {
         guard let error = stream.streamError else { return "未知错误" }
         return error.localizedDescription
-    }
-
-    /// 手动校验证书链：SNI 带尾点，但比对用的是去掉尾点的规范域名。
-    ///
-    /// `kCFStreamPropertySSLPeerCertificates` 在 Swift 里被标成不可用，
-    /// 但 CFNetwork 的流属性是按字符串匹配的，所以直接传这个键名。
-    private static func verifyPeer(_ stream: CFReadStream, host: String) throws {
-        let peerKey = CFStreamPropertyKey(rawValue: "kCFStreamPropertySSLPeerCertificates" as CFString)
-        guard let raw = CFReadStreamCopyProperty(stream, peerKey),
-              let certificates = raw as? [SecCertificate],
-              !certificates.isEmpty else {
-            throw StreamError.tls("服务器没有提供证书")
-        }
-
-        let policy = SecPolicyCreateSSL(true, host as CFString)
-        var trust: SecTrust?
-        let status = SecTrustCreateWithCertificates(certificates as CFArray, policy, &trust)
-        guard status == errSecSuccess, let created = trust else {
-            throw StreamError.tls("无法建立信任链（\(status)）")
-        }
-
-        var error: CFError?
-        guard SecTrustEvaluateWithError(created, &error) else {
-            let detail = (error as Error?)?.localizedDescription ?? "校验未通过"
-            throw StreamError.tls(detail)
-        }
     }
 
     private static func write(_ data: Data, to output: OutputStream, deadline: Date) throws {
