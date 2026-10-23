@@ -128,6 +128,9 @@ jobs:
           echo "--- Mach-O LC_BUILD_VERSION ---"
           otool -l build/Payload/LinuxDoClient.app/LinuxDoClient | grep -A5 LC_BUILD_VERSION
 
+          echo "--- 强链接检查：不得出现 iOS 17 独有库 ---"
+          python3 Scripts/check_ios16_links.py build/Payload/LinuxDoClient.app/LinuxDoClient
+
           echo "--- 确认不是 Debug 包（不应出现 debug dylib） ---"
           if ls build/Payload/LinuxDoClient.app/*.debug.dylib >/dev/null 2>&1; then
             echo "::error::Release 包里出现了 debug dylib，装到设备上会启动失败"; exit 1
