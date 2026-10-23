@@ -1,4 +1,4 @@
-name: LinuxDoClient
+﻿name: LinuxDoClient
 options:
   bundleIdPrefix: com.example
   deploymentTarget:
@@ -25,10 +25,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.linuxdoclient
         PRODUCT_NAME: LinuxDoClient
-        MARKETING_VERSION: "1.1.0"
-        CURRENT_PROJECT_VERSION: "100"
-        # DoH + ECH 本地代理：fluxdo_doh（GPL-3.0）交叉编译出的 Rust 静态库，CI 里构建
-        SWIFT_OBJC_BRIDGING_HEADER: "Sources/Support/DohProxyBridge.h"
+        MARKETING_VERSION: "1.1.1"
+        CURRENT_PROJECT_VERSION: "101"
+        # DoH + ECH 鏈湴浠ｇ悊锛歠luxdo_doh锛圙PL-3.0锛変氦鍙夌紪璇戝嚭鐨?Rust 闈欐€佸簱锛孋I 閲屾瀯寤?        SWIFT_OBJC_BRIDGING_HEADER: "Sources/Support/DohProxyBridge.h"
         LIBRARY_SEARCH_PATHS:
           - "$(SRCROOT)/rust/lib"
         OTHER_LDFLAGS:
@@ -40,13 +39,13 @@ targets:
           - "Security"
           - "-framework"
           - "CoreFoundation"
-        # Info.plist 由 XcodeGen 依据下方 info.properties 生成，不参与资源拷贝
+        # Info.plist 鐢?XcodeGen 渚濇嵁涓嬫柟 info.properties 鐢熸垚锛屼笉鍙備笌璧勬簮鎷疯礉
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: LINUX DO
-        CFBundleShortVersionString: "1.1.0"
-        CFBundleVersion: "100"
+        CFBundleShortVersionString: "1.1.1"
+        CFBundleVersion: "101"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
