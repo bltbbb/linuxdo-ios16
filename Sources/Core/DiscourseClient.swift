@@ -187,7 +187,6 @@ final class DiscourseClient {
 
     private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let cookieNames = HTTPCookieStorage.shared.cookies(for: req.url ?? baseURL)?.map { $0.name } ?? []
-        }
 
         // 优先走 DoH + IP 直连（绕 DNS 污染）；失败就回退系统 DNS 的 URLSession。
         var directFailure: String?
