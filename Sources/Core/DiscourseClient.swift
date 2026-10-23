@@ -165,7 +165,6 @@ final class DiscourseClient {
         if directBox.isAvailable {
             do {
                 let direct = try await DirectTransport.shared.send(req)
-                directBox.markSucceeded()
                 await RequestLog.shared.record(
                     method: req.httpMethod ?? "?",
                     url: (req.url?.path ?? "?") + " [DoH直连]",
@@ -176,12 +175,22 @@ final class DiscourseClient {
                         )
                         : Self.message(from: direct.0)
                 )
+
                 if AuthResponseDiagnostics.isCloudflareChallenge(direct.1) {
-                    throw DiscourseError.cloudflare
+                    // 直连被 Cloudflare 挑战：本机网络需要浏览器校验，直连这条路走不通。
+                    // 不要直接失败——回退到 URLSession，有梯子时那边是通的。
+                    directBox.markFailed()
+                    directFailure = "Cloudflare 挑战"
+                    await RequestLog.shared.record(
+                        method: req.httpMethod ?? "?",
+                        url: (req.url?.path ?? "?") + " [直连被挑战]",
+                        status: direct.1.statusCode,
+                        note: "回退系统网络"
+                    )
+                } else {
+                    directBox.markSucceeded()
+                    return direct
                 }
-                return direct
-            } catch let error as DiscourseError {
-                throw error
             } catch {
                 directBox.markFailed()
                 directFailure = error.localizedDescription
@@ -579,7 +588,8 @@ final class DirectAvailabilityBox: @unchecked Sendable {
 
     func markFailed() {
         lock.lock()
-        disabledUntil = Date().addingTimeInterval(60)
+        // 5 分钟内不再重试直连：被挑战时每次重试都要白等几秒。
+        disabledUntil = Date().addingTimeInterval(300)
         lock.unlock()
     }
 }
