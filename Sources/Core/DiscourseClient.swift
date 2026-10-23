@@ -31,7 +31,11 @@ final class DiscourseClient {
 
     static let shared = DiscourseClient()
 
-    let baseURL: URL
+    /// 实际使用的根地址：自定义反代优先，否则用默认站点。
+    var baseURL: URL {
+        NetworkSettings.customBaseURL ?? defaultBaseURL
+    }
+    private let defaultBaseURL: URL
     private let session: URLSession
     private let decoder = JSONDecoder()
     private let csrfCache = CSRFCache()
@@ -44,7 +48,7 @@ final class DiscourseClient {
     }
 
     init(baseURL: URL = AppConfig.baseURL) {
-        self.baseURL = baseURL
+        self.defaultBaseURL = baseURL
         let cfg = URLSessionConfiguration.default
         cfg.httpCookieStorage = HTTPCookieStorage.shared
         cfg.httpShouldSetCookies = true

@@ -27,6 +27,10 @@ final class DirectTransport {
 
     private let queue = DispatchQueue(label: "io.linuxdo.direct-transport")
 
+    /// 已验证可连通的地址，按 host 缓存十分钟。
+    private let cacheLock = NSLock()
+    private var preferred: [String: (ip: String, at: Date)] = [:]
+
     func send(_ request: URLRequest, timeout: TimeInterval = 12) async throws -> (Data, HTTPURLResponse) {
         guard let url = request.url, let host = url.host else {
             throw TransportError.badURL
@@ -43,41 +47,52 @@ final class DirectTransport {
             throw TransportError.connect("没有可用的服务器地址")
         }
 
+        // 上次打通的地址先用一次，省掉每次请求都重新探测的开销。
+        if let cached = cachedIP(for: host) {
+            do {
+                return try await roundTrip(
+                    request, url: url, host: host, ip: cached, port: port, timeout: min(timeout, 6)
+                )
+            } catch {
+                storeCachedIP(nil, for: host)
+            }
+        }
+
         // 并发探测：每个候选各自有硬超时，谁先打通就用谁。
-        // 单点被封锁时，同段邻居往往还通。
         let probeTimeout = min(timeout, 4)
         var lastError: Error?
 
         let raced = await withTaskGroup(
-            of: Result<(Data, HTTPURLResponse), Error>.self,
-            returning: Result<(Data, HTTPURLResponse), Error>?.self
-        ) { group in
+            of: (String, Result<(Data, HTTPURLResponse), Error>).self,
+            returning: (String, (Data, HTTPURLResponse))?.self
+        ) { group -> (String, (Data, HTTPURLResponse))? in
             for ip in candidates.prefix(20) {
                 group.addTask {
                     do {
-                        return .success(try await self.roundTrip(
+                        return (ip, .success(try await self.roundTrip(
                             request, url: url, host: host, ip: ip, port: port, timeout: probeTimeout
-                        ))
+                        )))
                     } catch {
-                        return .failure(error)
+                        return (ip, .failure(error))
                     }
                 }
             }
 
-            var winner: Result<(Data, HTTPURLResponse), Error>?
+            var winner: (String, (Data, HTTPURLResponse))?
             while let outcome = await group.next() {
-                if case .success = outcome {
-                    winner = outcome
+                if case .success(let payload) = outcome.1 {
+                    winner = (outcome.0, payload)
                     group.cancelAll()
                     break
                 }
-                if case .failure(let error) = outcome { lastError = error }
+                if case .failure(let error) = outcome.1 { lastError = error }
             }
             return winner
         }
 
-        if case .success(let payload) = raced {
-            return payload
+        if let winner = raced {
+            storeCachedIP(winner.0, for: host)
+            return winner.1
         }
         throw lastError ?? TransportError.connect("所有候选地址均不可达（\(candidates.count) 个）")
     }
@@ -104,6 +119,92 @@ final class DirectTransport {
         return result
     }
 
+
+    // MARK: - 已连通地址缓存
+
+    private func cachedIP(for host: String) -> String? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard let entry = preferred[host],
+              Date().timeIntervalSince(entry.at) < 600 else { return nil }
+        return entry.ip
+    }
+
+    private func storeCachedIP(_ ip: String?, for host: String) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let ip = ip {
+            preferred[host] = (ip, Date())
+        } else {
+            preferred.removeValue(forKey: host)
+        }
+    }
+
+    // MARK: - TLS
+
+    /// SNI 故意带尾点写成 `linux.do.`。
+    ///
+    /// 中间设备对握手里的 SNI 做精确字符串匹配，命中就直接回 RST：
+    /// 同一个 Cloudflare 边缘 IP，SNI 填 `cloudflare.com` 握手成功，
+    /// 填 `linux.do` 立刻被重置——换哪个 IP 都表现为「直连超时」。
+    /// 带尾点的写法不在名单里，而 RFC 6125 允许尾点，
+    /// Cloudflare 照常返回 linux.do 的证书。
+    ///
+    /// 证书校验用的是去掉尾点的规范域名，信任链、有效期、SAN 一项不减。
+    static func makeTLSOptions(host: String) -> NWProtocolTLS.Options {
+        let tlsOptions = NWProtocolTLS.Options()
+        let sec = tlsOptions.securityProtocolOptions
+
+        let sni = host.hasSuffix(".") ? host : host + "."
+        sec_protocol_options_set_tls_server_name(sec, sni as CFString)
+        sec_protocol_options_set_min_tls_protocol_version(sec, .TLSv12)
+        sec_protocol_options_set_peer_authentication_required(sec, true)
+
+        let verifyQueue = DispatchQueue(label: "io.linuxdo.tls-verify")
+        sec_protocol_options_set_verify_block(sec, { _, secTrust, complete in
+            let trust = sec_trust_copy_ref(secTrust).takeRetainedValue()
+            let policy = SecPolicyCreateSSL(true, host as CFString)
+            SecTrustSetPolicies(trust, policy)
+            var error: CFError?
+            complete(SecTrustEvaluateWithError(trust, &error))
+        }, verifyQueue)
+
+        return tlsOptions
+    }
+
+    /// 用当前网络实测一次 DoH → TLS → HTTP，返回给人看的结论。
+    func diagnose() async -> String {
+        guard let probeURL = URL(string: "https://linux.do/session/csrf.json") else {
+            return "内部地址错误"
+        }
+        var request = URLRequest(url: probeURL)
+        request.httpMethod = "GET"
+        request.setValue(AppConfig.userAgent, forHTTPHeaderField: "User-Agent")
+
+        let started = Date()
+        do {
+            let seeds = NetworkSettings.customIPs.isEmpty
+                ? try await DoHResolver.shared.resolve("linux.do")
+                : NetworkSettings.customIPs
+            let candidates = Self.expandNeighbours(seeds)
+
+            let (data, response) = try await send(request, timeout: 12)
+            let elapsed = String(format: "%.2f", Date().timeIntervalSince(started))
+            let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
+
+            var lines = ["DoH 解析到 \(seeds.count) 个地址：\(seeds.prefix(3).joined(separator: ", "))"]
+            lines.append("候选（含邻居）：\(candidates.count) 个")
+            lines.append("HTTP \(response.statusCode)，耗时 \(elapsed)s")
+            if AuthResponseDiagnostics.isCloudflareChallenge(response) {
+                lines.append("被 Cloudflare 挑战拦截（缺少 cf_clearance）")
+            }
+            lines.append(body.isEmpty ? "（空响应体）" : "响应：\(body)")
+            return lines.joined(separator: "\n")
+        } catch {
+            let elapsed = String(format: "%.2f", Date().timeIntervalSince(started))
+            return "失败（\(elapsed)s）：\(error.localizedDescription)"
+        }
+    }
     // MARK: - 单次连接
 
     private func roundTrip(
@@ -115,11 +216,7 @@ final class DirectTransport {
         timeout: TimeInterval
     ) async throws -> (Data, HTTPURLResponse) {
 
-        let tlsOptions = NWProtocolTLS.Options()
-        sec_protocol_options_set_tls_server_name(tlsOptions.securityProtocolOptions, host)
-        sec_protocol_options_set_min_tls_protocol_version(
-            tlsOptions.securityProtocolOptions, .TLSv12
-        )
+        let tlsOptions = Self.makeTLSOptions(host: host)
 
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.connectionTimeout = 8

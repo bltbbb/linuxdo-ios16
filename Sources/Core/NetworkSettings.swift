@@ -8,6 +8,24 @@ import Foundation
 enum NetworkSettings {
 
     private static let key = "custom-host-ips"
+    private static let baseURLKey = "custom-api-base-url"
+
+    /// 自定义 API 根地址（自建反代）。空则用默认的 https://linux.do。
+    static var customBaseURL: URL? {
+        get {
+            let raw = (UserDefaults.standard.string(forKey: baseURLKey) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !raw.isEmpty, let url = URL(string: raw), url.host != nil else { return nil }
+            return url
+        }
+        set {
+            if let newValue = newValue {
+                UserDefaults.standard.set(newValue.absoluteString, forKey: baseURLKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: baseURLKey)
+            }
+        }
+    }
 
     static var customIPs: [String] {
         get {
