@@ -5,6 +5,9 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
   group: package-ipa-${{ github.ref }}
   cancel-in-progress: true
@@ -109,7 +112,9 @@ jobs:
 
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
           OUT="LinuxDoClient-${VERSION}-unsigned.ipa"
-          ( cd build && zip -qry "../$OUT" Payload )
+          # 用 ditto 而不是 zip：Apple 官方打包 ipa 的方式，保留扩展属性与符号链接，
+          # zip 在 macOS 上可能丢元数据。产物仍是标准 ipa（Payload/ 结构）。
+          ( cd build && ditto -c -k --sequesterRsrc --keepParent Payload "../$OUT" )
           echo "IPA=$OUT" >> "$GITHUB_ENV"
           ls -lh "$OUT"
 
@@ -149,3 +154,33 @@ jobs:
             archive.log
           if-no-files-found: error
           retention-days: 30
+
+      # tag（v*）构建自动发 Release：附件是原始 .ipa，直接可给 TrollStore 用，
+      # 不再需要下载 artifact 的 zip 再解压。
+      - name: Publish to GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${IPA}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$IPA" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$IPA" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --notes "iOS 16.0 target / arm64 / ad-hoc signed / TrollStore ready. Install: TrollStore -> + -> Install IPA from URL -> $URL"
+          fi
+          echo "直链: $URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Print install URL
+        if: always()
+        run: |
+          echo "### 安装直链" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${IPA}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "本次是手动构建（未打 tag），产物在 Artifacts 里；打 tag 推送会自动发 Release 直链。" >> "$GITHUB_STEP_SUMMARY"
+          fi
