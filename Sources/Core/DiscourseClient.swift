@@ -71,11 +71,18 @@ final class DiscourseClient {
         if !query.isEmpty { comps.queryItems = query }
         return comps.url
     }
-
     private func decorate(_ req: inout URLRequest) {
         req.setValue(AppConfig.userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+        // 浏览器都会带这几个，缺了容易拉低 Cloudflare 的机器人评分。
+        req.setValue("same-origin", forHTTPHeaderField: "Sec-Fetch-Site")
+        req.setValue("cors", forHTTPHeaderField: "Sec-Fetch-Mode")
+        req.setValue("empty", forHTTPHeaderField: "Sec-Fetch-Dest")
+        if req.value(forHTTPHeaderField: "Referer") == nil {
+            req.setValue("https://\(baseURL.host ?? "linux.do")/", forHTTPHeaderField: "Referer")
+        }
 
         // 直连和 stream 两条路都绕开 URLSession，自动 Cookie 不生效，
         // 所以这里统一手动挂上；URLSession 侧也关掉了自动挂载，避免重复。

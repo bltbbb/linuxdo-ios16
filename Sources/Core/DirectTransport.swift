@@ -101,12 +101,15 @@ final class DirectTransport {
         timeout: TimeInterval,
         useStream: Bool
     ) async -> (String, (Data, HTTPURLResponse))? {
-        await withTaskGroup(
-            of: (String, Result<(Data, HTTPURLResponse), Error>).self,
-            returning: (String, (Data, HTTPURLResponse))?.self
-        ) { group -> (String, (Data, HTTPURLResponse))? in
-            for ip in candidates.prefix(20) {
-                group.addTask {
+        // 不用 TaskGroup：即使找到赢家，group 也要等所有子任务结束才返回，
+        // 失败候选各占满超时，会把一次请求拖到十几秒。
+        // 这里第一个成功就直接 resume，其余任务在后台自然超时退出。
+        await withCheckedContinuation { continuation in
+            let ips = Array(candidates.prefix(20))
+            let box = RaceBox(count: ips.count)
+
+            for ip in ips {
+                Task.detached {
                     do {
                         let payload: (Data, HTTPURLResponse)
                         if useStream {
@@ -118,22 +121,16 @@ final class DirectTransport {
                                 request, url: url, host: host, ip: ip, port: port, timeout: timeout
                             )
                         }
-                        return (ip, .success(payload))
+                        if box.claimWin() {
+                            continuation.resume(returning: (ip, payload))
+                        }
                     } catch {
-                        return (ip, .failure(error))
+                        if box.failOne() {
+                            continuation.resume(returning: nil)
+                        }
                     }
                 }
             }
-
-            var winner: (String, (Data, HTTPURLResponse))?
-            while let outcome = await group.next() {
-                if case .success(let payload) = outcome.1 {
-                    winner = (outcome.0, payload)
-                    group.cancelAll()
-                    break
-                }
-            }
-            return winner
         }
     }
 
@@ -231,6 +228,7 @@ final class DirectTransport {
     func diagnose() async -> String {
         let host = "linux.do"
         var lines: [String] = []
+        lines.append("UA：\(AppConfig.userAgent)")
 
         var seeds = NetworkSettings.customIPs
         if seeds.isEmpty {
@@ -664,5 +662,37 @@ private final class WaiterNote {
         lock.lock()
         defer { lock.unlock() }
         return reason
+    }
+}
+
+/// 竞速用的一次性裁决：第一个成功者独占，全部失败时唤醒一次。
+private final class RaceBox {
+    private let lock = NSLock()
+    private var pending: Int
+    private var finished = false
+
+    init(count: Int) {
+        pending = max(count, 1)
+    }
+
+    func claimWin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if finished { return false }
+        finished = true
+        return true
+    }
+
+    /// 返回 true 表示这是最后一个失败者，调用方应当以失败收尾。
+    func failOne() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if finished { return false }
+        pending -= 1
+        if pending <= 0 {
+            finished = true
+            return true
+        }
+        return false
     }
 }
