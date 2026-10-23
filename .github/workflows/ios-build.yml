@@ -1,8 +1,8 @@
 name: iOS Build
 
 on:
-  push:
-    branches: [main]
+  # 只在 PR 和手动触发时跑：main 的每次推送都由 Package IPA 负责编译，
+  # 避免一次发布构建两遍。
   pull_request:
   workflow_dispatch:
 

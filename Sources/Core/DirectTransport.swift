@@ -54,29 +54,72 @@ final class DirectTransport {
 
         // 上次打通的地址先用一次，省掉每次请求都重新探测的开销。
         if let cached = cachedIP(for: host) {
-            do {
-                return try await roundTrip(
-                    request, url: url, host: host, ip: cached, port: port, timeout: min(timeout, 6)
-                )
-            } catch {
-                storeCachedIP(nil, for: host)
+            if let payload = try? await StreamTransport.send(
+                request, url: url, host: host, ip: cached, port: port, timeout: min(timeout, 6)
+            ) {
+                return payload
             }
+            if let payload = try? await roundTrip(
+                request, url: url, host: host, ip: cached, port: port, timeout: min(timeout, 6)
+            ) {
+                return payload
+            }
+            storeCachedIP(nil, for: host)
         }
 
-        // 并发探测：每个候选各自有硬超时，谁先打通就用谁。
         let probeTimeout = min(timeout, 4)
         var lastError: Error?
 
-        let raced = await withTaskGroup(
+        // 先走 CFNetwork 的 socket stream：URLSession 能出网而 NWConnection 全挂的
+        // 环境下，只有这条路能建连。
+        if let winner = await race(
+            candidates, request: request, url: url, host: host, port: port,
+            timeout: probeTimeout, useStream: true
+        ) {
+            storeCachedIP(winner.0, for: host)
+            return winner.1
+        }
+
+        // 回退到 Network.framework。
+        if let winner = await race(
+            candidates, request: request, url: url, host: host, port: port,
+            timeout: probeTimeout, useStream: false
+        ) {
+            storeCachedIP(winner.0, for: host)
+            return winner.1
+        }
+
+        throw lastError ?? TransportError.connect("所有候选地址均不可达（\(candidates.count) 个）")
+    }
+
+    /// 并发探测：每个候选各自有硬超时，谁先打通就用谁。
+    private func race(
+        _ candidates: [String],
+        request: URLRequest,
+        url: URL,
+        host: String,
+        port: Int,
+        timeout: TimeInterval,
+        useStream: Bool
+    ) async -> (String, (Data, HTTPURLResponse))? {
+        await withTaskGroup(
             of: (String, Result<(Data, HTTPURLResponse), Error>).self,
             returning: (String, (Data, HTTPURLResponse))?.self
         ) { group -> (String, (Data, HTTPURLResponse))? in
             for ip in candidates.prefix(20) {
                 group.addTask {
                     do {
-                        return (ip, .success(try await self.roundTrip(
-                            request, url: url, host: host, ip: ip, port: port, timeout: probeTimeout
-                        )))
+                        let payload: (Data, HTTPURLResponse)
+                        if useStream {
+                            payload = try await StreamTransport.send(
+                                request, url: url, host: host, ip: ip, port: port, timeout: timeout
+                            )
+                        } else {
+                            payload = try await self.roundTrip(
+                                request, url: url, host: host, ip: ip, port: port, timeout: timeout
+                            )
+                        }
+                        return (ip, .success(payload))
                     } catch {
                         return (ip, .failure(error))
                     }
@@ -90,16 +133,9 @@ final class DirectTransport {
                     group.cancelAll()
                     break
                 }
-                if case .failure(let error) = outcome.1 { lastError = error }
             }
             return winner
         }
-
-        if let winner = raced {
-            storeCachedIP(winner.0, for: host)
-            return winner.1
-        }
-        throw lastError ?? TransportError.connect("所有候选地址均不可达（\(candidates.count) 个）")
     }
 
     /// 内置的真实 Cloudflare 边缘地址。
@@ -218,19 +254,20 @@ final class DirectTransport {
         lines.append("候选（含同段邻居）\(candidates.count) 个")
 
         // 逐个实测，全部并发，最多 6 秒。
-        let targets = Array(candidates.prefix(6))
-        var probeResults: [String: (String, String)] = [:]
-        await withTaskGroup(of: (String, String, String).self) { group in
+        let targets = Array(candidates.prefix(4))
+        var probeResults: [String: (String, String, String)] = [:]
+        await withTaskGroup(of: (String, String, String, String).self) { group in
             for ip in targets {
                 group.addTask {
                     async let plain = self.tlsProbe(ip: ip, host: host, sni: host, timeout: 5)
                     async let dotted = self.tlsProbe(ip: ip, host: host, sni: host + ".", timeout: 5)
-                    let (a, b) = await (plain, dotted)
-                    return (ip, a, b)
+                    async let stream = self.streamProbe(ip: ip, host: host, timeout: 5)
+                    let (a, b, c) = await (plain, dotted, stream)
+                    return (ip, a, b, c)
                 }
             }
-            for await (ip, plain, dotted) in group {
-                probeResults[ip] = (plain, dotted)
+            for await (ip, plain, dotted, stream) in group {
+                probeResults[ip] = (plain, dotted, stream)
             }
         }
 
@@ -238,8 +275,9 @@ final class DirectTransport {
         for ip in targets {
             guard let result = probeResults[ip] else { continue }
             lines.append("\(ip)")
-            lines.append("  普通 SNI：\(result.0)")
-            lines.append("  尾点 SNI：\(result.1)")
+            lines.append("  Network.framework 普通 SNI：\(result.0)")
+            lines.append("  Network.framework 尾点 SNI：\(result.1)")
+            lines.append("  CFNetwork stream：\(result.2)")
         }
 
         lines.append("")
@@ -269,6 +307,29 @@ final class DirectTransport {
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    /// 用 CFNetwork 的 socket stream 做一次完整请求，看这条路是否可用。
+    private func streamProbe(ip: String, host: String, timeout: TimeInterval) async -> String {
+        guard let probeURL = URL(string: "https://\(host)/session/csrf.json") else {
+            return "内部地址错误"
+        }
+        var request = URLRequest(url: probeURL)
+        request.httpMethod = "GET"
+        request.setValue(AppConfig.userAgent, forHTTPHeaderField: "User-Agent")
+        let started = Date()
+        do {
+            let (_, response) = try await StreamTransport.send(
+                request, url: probeURL, host: host, ip: ip, port: 443, timeout: timeout
+            )
+            return String(
+                format: "HTTP %d  %.2fs",
+                response.statusCode,
+                Date().timeIntervalSince(started)
+            )
+        } catch {
+            return String(format: "%.2fs ", Date().timeIntervalSince(started)) + error.localizedDescription
+        }
     }
 
     /// 只做握手、不发任何数据，报告耗时与结果。
