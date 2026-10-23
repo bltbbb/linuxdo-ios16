@@ -151,11 +151,11 @@ final class DirectTransport {
     /// Cloudflare 照常返回 linux.do 的证书。
     ///
     /// 证书校验用的是去掉尾点的规范域名，信任链、有效期、SAN 一项不减。
-    static func makeTLSOptions(host: String) -> NWProtocolTLS.Options {
+    static func makeTLSOptions(host: String, sni overrideSNI: String? = nil) -> NWProtocolTLS.Options {
         let tlsOptions = NWProtocolTLS.Options()
         let sec = tlsOptions.securityProtocolOptions
 
-        let sni = host.hasSuffix(".") ? host : host + "."
+        let sni = overrideSNI ?? (host.hasSuffix(".") ? host : host + ".")
         sni.withCString { sec_protocol_options_set_tls_server_name(sec, $0) }
         sec_protocol_options_set_min_tls_protocol_version(sec, .TLSv12)
         sec_protocol_options_set_peer_authentication_required(sec, true)
@@ -172,10 +172,45 @@ final class DirectTransport {
         return tlsOptions
     }
 
-    /// 用当前网络实测一次 DoH → TLS → HTTP，返回给人看的结论。
+    /// 用当前网络实测一次，逐项报告，方便判断卡在哪一层。
+    ///
+    /// 对同一批地址分别用「普通 SNI」和「带尾点 SNI」握手：
+    /// 前者失败、后者成功说明尾点绕开有效；
+    /// 两者都在 4 秒上下超时说明 TCP 就没通，只能换地址或走反代。
     func diagnose() async -> String {
-        guard let probeURL = URL(string: "https://linux.do/session/csrf.json") else {
-            return "内部地址错误"
+        let host = "linux.do"
+        var lines: [String] = []
+
+        var seeds = NetworkSettings.customIPs
+        if seeds.isEmpty {
+            do {
+                seeds = try await DoHResolver.shared.resolve(host)
+                lines.append("DoH 解析到 \(seeds.count) 个：\(seeds.prefix(4).joined(separator: ", "))")
+            } catch {
+                lines.append("DoH 解析失败：\(error.localizedDescription)")
+                return lines.joined(separator: "\n")
+            }
+        } else {
+            lines.append("使用手填地址 \(seeds.count) 个：\(seeds.prefix(4).joined(separator: ", "))")
+        }
+
+        guard !seeds.isEmpty else {
+            return lines.joined(separator: "\n") + "\n没有可用地址"
+        }
+
+        lines.append("")
+        for ip in Array(seeds.prefix(2)) {
+            async let plain = tlsProbe(ip: ip, host: host, sni: host, timeout: 6)
+            async let dotted = tlsProbe(ip: ip, host: host, sni: host + ".", timeout: 6)
+            let (plainResult, dottedResult) = await (plain, dotted)
+            lines.append("\(ip)")
+            lines.append("  普通 SNI：\(plainResult)")
+            lines.append("  尾点 SNI：\(dottedResult)")
+        }
+
+        lines.append("")
+        guard let probeURL = URL(string: "https://\(host)/session/csrf.json") else {
+            return lines.joined(separator: "\n")
         }
         var request = URLRequest(url: probeURL)
         request.httpMethod = "GET"
@@ -183,26 +218,42 @@ final class DirectTransport {
 
         let started = Date()
         do {
-            let seeds = NetworkSettings.customIPs.isEmpty
-                ? try await DoHResolver.shared.resolve("linux.do")
-                : NetworkSettings.customIPs
-            let candidates = Self.expandNeighbours(seeds)
-
             let (data, response) = try await send(request, timeout: 12)
             let elapsed = String(format: "%.2f", Date().timeIntervalSince(started))
-            let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
-
-            var lines = ["DoH 解析到 \(seeds.count) 个地址：\(seeds.prefix(3).joined(separator: ", "))"]
-            lines.append("候选（含邻居）：\(candidates.count) 个")
-            lines.append("HTTP \(response.statusCode)，耗时 \(elapsed)s")
+            var tail = "完整请求：HTTP \(response.statusCode)，耗时 \(elapsed)s"
             if AuthResponseDiagnostics.isCloudflareChallenge(response) {
-                lines.append("被 Cloudflare 挑战拦截（缺少 cf_clearance）")
+                tail += "（被 Cloudflare 挑战拦截，需要带 cf_clearance 的 Cookie）"
             }
-            lines.append(body.isEmpty ? "（空响应体）" : "响应：\(body)")
-            return lines.joined(separator: "\n")
+            let body = String(data: data.prefix(160), encoding: .utf8) ?? ""
+            if !body.isEmpty {
+                tail += "\n" + body.replacingOccurrences(of: "\n", with: " ")
+            }
+            lines.append(tail)
         } catch {
             let elapsed = String(format: "%.2f", Date().timeIntervalSince(started))
-            return "失败（\(elapsed)s）：\(error.localizedDescription)"
+            lines.append("完整请求：失败（\(elapsed)s）\(error.localizedDescription)")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    /// 只做握手、不发任何数据，报告耗时与结果。
+    private func tlsProbe(ip: String, host: String, sni: String, timeout: TimeInterval) async -> String {
+        let tlsOptions = Self.makeTLSOptions(host: host, sni: sni)
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.connectionTimeout = Int(timeout)
+        let parameters = NWParameters(tls: tlsOptions, tcp: tcpOptions)
+
+        guard let nwPort = NWEndpoint.Port(rawValue: 443) else { return "端口错误" }
+        let connection = NWConnection(host: NWEndpoint.Host(ip), port: nwPort, using: parameters)
+        defer { connection.cancel() }
+
+        let started = Date()
+        do {
+            try await waitUntilReady(connection, timeout: timeout)
+            return String(format: "握手成功 %.2fs", Date().timeIntervalSince(started))
+        } catch {
+            return String(format: "%.2fs ", Date().timeIntervalSince(started)) + error.localizedDescription
         }
     }
     // MARK: - 单次连接
@@ -240,6 +291,7 @@ final class DirectTransport {
 
     private func waitUntilReady(_ connection: NWConnection, timeout: TimeInterval) async throws {
         // 不依赖 cancel 后一定回调：超时由定时器直接 resume，避免 await 永久挂住。
+        let note = WaiterNote()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             let box = ResumeOnce(cont)
             connection.stateUpdateHandler = { state in
@@ -248,6 +300,9 @@ final class DirectTransport {
                     box.resume()
                 case .failed(let error):
                     box.resume(throwing: TransportError.connect(error.localizedDescription))
+                case .waiting(let error):
+                    // 路径不可用（无路由 / 被要求走别的接口）时停在这里，记下原因。
+                    note.record(error.localizedDescription)
                 case .cancelled:
                     box.resume(throwing: TransportError.connect("连接被取消"))
                 default:
@@ -257,7 +312,11 @@ final class DirectTransport {
             connection.start(queue: self.queue)
             self.queue.asyncAfter(deadline: .now() + timeout) {
                 connection.cancel()
-                box.resume(throwing: TransportError.timeout)
+                if let reason = note.value {
+                    box.resume(throwing: TransportError.connect("等待路径：\(reason)"))
+                } else {
+                    box.resume(throwing: TransportError.timeout)
+                }
             }
         }
     }
@@ -472,5 +531,23 @@ private final class ResumeResult {
         let target = continuation
         continuation = nil
         return target
+    }
+}
+
+/// 记录 `NWConnection` 停在 `.waiting` 的原因，供超时报错使用。
+private final class WaiterNote {
+    private var reason: String?
+    private let lock = NSLock()
+
+    func record(_ text: String) {
+        lock.lock()
+        reason = text
+        lock.unlock()
+    }
+
+    var value: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return reason
     }
 }
