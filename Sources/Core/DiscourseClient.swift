@@ -187,43 +187,6 @@ final class DiscourseClient {
 
     private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let cookieNames = HTTPCookieStorage.shared.cookies(for: req.url ?? baseURL)?.map { $0.name } ?? []
-
-        // 安全直连模式：改由 WebView 里的 fetch() 出请求。
-        // cf_clearance 与签发时的 TLS 指纹绑定，只有 WebKit 亲自发才被认。
-        if proxyPort != nil, let url = req.url {
-            var path = url.path.isEmpty ? "/" : url.path
-            if let query = url.query, !query.isEmpty { path += "?" + query }
-            do {
-                let (data, status) = try await WebViewTransport.shared.fetch(
-                    path: path,
-                    method: req.httpMethod ?? "GET",
-                    body: req.httpBody,
-                    contentType: req.value(forHTTPHeaderField: "Content-Type")
-                )
-                if let response = HTTPURLResponse(
-                    url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil
-                ) {
-                    await RequestLog.shared.record(
-                        method: req.httpMethod ?? "?",
-                        url: path + " [WebView]",
-                        status: status,
-                        note: Self.message(from: data)
-                    )
-                    if AuthResponseDiagnostics.isCloudflareChallenge(response, body: data) {
-                        throw DiscourseError.cloudflare
-                    }
-                    return (data, response)
-                }
-            } catch let error as DiscourseError {
-                throw error
-            } catch {
-                await RequestLog.shared.record(
-                    method: req.httpMethod ?? "?",
-                    url: path + " [WebView 失败]",
-                    status: -1,
-                    note: error.localizedDescription
-                )
-            }
         }
 
         // 优先走 DoH + IP 直连（绕 DNS 污染）；失败就回退系统 DNS 的 URLSession。

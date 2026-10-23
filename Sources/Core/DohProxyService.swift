@@ -95,29 +95,31 @@ final class DohProxyService {
         if isRunning, let port = runningPort { return port }
         guard let ca = rootCA() else { return nil }
 
-        let config: [String: Any] = [
-            "bind_addr": "127.0.0.1",
-            "bind_port": 0,
-            "enable_doh": true,
-            "doh_server": dohEndpoint,
-            "doh_bootstrap_ips": dohBootstrap,
-            "prefer_ipv6": false,
-            "timeout_secs": 8,
-            "mitm_connect": true,
-            "mitm_hosts": [host],
-            "h2_mitm": false
-        ]
-
-        guard let data = try? JSONSerialization.data(withJSONObject: config),
-              let json = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-
+        // 端口固定在 18888：Wi-Fi 代理只填一次，之后每次开关都不用再改。
+        // 万一被占用，退回自动分配。
         doh_proxy_init_logging()
-        let port = json.withCString { doh_proxy_start_with_config_json($0) }
-        guard port > 0 else { return nil }
-        runningPort = Int(port)
-        return runningPort
+        for candidate in [18888, 0] {
+            let config: [String: Any] = [
+                "bind_addr": "127.0.0.1",
+                "bind_port": candidate,
+                "enable_doh": true,
+                "doh_server": dohEndpoint,
+                "doh_bootstrap_ips": dohBootstrap,
+                "prefer_ipv6": false,
+                "timeout_secs": 8,
+                "mitm_connect": true,
+                "mitm_hosts": [host],
+                "h2_mitm": false
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: config),
+                  let json = String(data: data, encoding: .utf8) else { continue }
+            let port = json.withCString { doh_proxy_start_with_config_json($0) }
+            if port > 0 {
+                runningPort = Int(port)
+                return runningPort
+            }
+        }
+        return nil
     }
 
     func stop() {
