@@ -34,8 +34,7 @@ final class DiscourseClient {
     let baseURL: URL
     private let session: URLSession
     private let decoder = JSONDecoder()
-    private let csrfLock = NSLock()
-    private var cachedCSRF: String?
+    private let csrfCache = CSRFCache()
 
     init(baseURL: URL = AppConfig.baseURL) {
         self.baseURL = baseURL
@@ -128,10 +127,7 @@ final class DiscourseClient {
     // MARK: - CSRF
 
     func csrfToken(forceRefresh: Bool = false) async throws -> String {
-        csrfLock.lock()
-        let cached = cachedCSRF
-        csrfLock.unlock()
-        if let cached, !forceRefresh, !cached.isEmpty { return cached }
+        if let cached = await csrfCache.value, !forceRefresh, !cached.isEmpty { return cached }
 
         guard let url = makeURL("/session/csrf.json") else { throw DiscourseError.badURL }
         var req = URLRequest(url: url)
@@ -142,9 +138,7 @@ final class DiscourseClient {
         guard let parsed = try? decoder.decode(CSRFResponse.self, from: data) else {
             throw DiscourseError.decoding("csrf token 缺失")
         }
-        csrfLock.lock()
-        cachedCSRF = parsed.csrf
-        csrfLock.unlock()
+        await csrfCache.set(parsed.csrf)
         return parsed.csrf
     }
 
@@ -230,10 +224,8 @@ final class DiscourseClient {
     }
 
     func logout() async throws {
-        try? await postForm("/logout", fields: [:])
-        csrfLock.lock()
-        cachedCSRF = nil
-        csrfLock.unlock()
+        _ = try? await postForm("/logout", fields: [])
+        await csrfCache.set(nil)
         if let cookies = HTTPCookieStorage.shared.cookies {
             cookies.forEach { HTTPCookieStorage.shared.deleteCookie($0) }
         }
@@ -275,5 +267,18 @@ final class DiscourseClient {
         let query = ids.map { URLQueryItem(name: "post_ids[]", value: String($0)) }
         let response = try await get("/t/\(id)/posts.json", query: query, as: PostStreamResponse.self)
         return response.postStream.posts
+    }
+}
+
+/// 异步安全的 CSRF 缓存。替代 `NSLock`——后者在异步上下文中使用
+/// 在 Swift 6 语言模式下会直接变成编译错误。
+actor CSRFCache {
+
+    private var token: String?
+
+    var value: String? { token }
+
+    func set(_ newValue: String?) {
+        token = newValue
     }
 }
