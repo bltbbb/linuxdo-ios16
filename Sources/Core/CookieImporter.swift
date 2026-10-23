@@ -16,8 +16,29 @@ enum CookieImporter {
     /// 2. `_t=xxxxx; _forum_session=yyyyy`
     /// 3. 只有 `_t` 的值（裸值）
     static func parse(_ raw: String, host: String) -> [HTTPCookie] {
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return [] }
+
+        // 支持直接粘贴 "Cookie: _t=..." 或 "cookie: ..." 前缀
+        if let colon = text.firstIndex(of: ":"),
+           text[text.startIndex..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "cookie" {
+            text = String(text[text.index(after: colon)...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // 多行粘贴（例如从 DevTools「复制为 cURL」）时，只取含 _t 的那一行
+        if text.contains("\n") {
+            let lines = text.split(whereSeparator: \.isNewline).map(String.init)
+            if let line = lines.first(where: { $0.contains("_t=") }) {
+                text = line
+            }
+        }
+
+        // 只要出现 _t=，就从它开始截，避免把前面的杂项当成 cookie 名
+        if let range = text.range(of: "_t=") {
+            text = String(text[range.lowerBound...])
+        }
+        text = text.trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
 
         var pairs: [(String, String)] = []
 
