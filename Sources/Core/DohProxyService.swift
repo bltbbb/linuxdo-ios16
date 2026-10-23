@@ -28,30 +28,22 @@ final class DohProxyService {
 
     // MARK: - CA
 
-    /// 取出或生成一份本机专属 CA。证书要装进系统信任，私钥只留在 Keychain。
+    /// 拿代理实际使用的根证书。
+    ///
+    /// 代理的 MITM 叶证书一律由**编译进静态库的内置 CA** 签发
+    /// （fluxdo_doh 的 build.rs 在构建时生成 certs/ca.crt），
+    /// 配置里的 ca_cert_pem / ca_key_pem 那个库并没有读取。
+    /// 所以这里必须取内置的那张，否则装上的根证书和叶证书对不上，
+    /// URLSession 会直接报「SSL error / 无法建立安全连接」。
     func rootCA() -> RootCA? {
         if let ca = cachedCA { return ca }
-        if let cert = Keychain.get("doh-ca-cert"),
-           let key = Keychain.get("doh-ca-key"),
-           !cert.isEmpty, !key.isEmpty {
-            let ca = RootCA(certPEM: cert, keyPEM: key)
-            cachedCA = ca
-            return ca
-        }
 
-        guard let raw = doh_proxy_generate_ca() else { return nil }
+        guard let raw = doh_proxy_get_embedded_ca_pem() else { return nil }
         defer { doh_proxy_free_string(raw) }
-        guard let text = String(validatingUTF8: raw),
-              let data = text.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let cert = object["cert_pem"] as? String,
-              let key = object["key_pem"] as? String else {
-            return nil
-        }
+        guard let pem = String(validatingUTF8: raw),
+              pem.contains("BEGIN CERTIFICATE") else { return nil }
 
-        Keychain.set(cert, for: "doh-ca-cert")
-        Keychain.set(key, for: "doh-ca-key")
-        let ca = RootCA(certPEM: cert, keyPEM: key)
+        let ca = RootCA(certPEM: pem, keyPEM: "")
         cachedCA = ca
         return ca
     }
@@ -113,9 +105,7 @@ final class DohProxyService {
             "timeout_secs": 8,
             "mitm_connect": true,
             "mitm_hosts": [host],
-            "h2_mitm": true,
-            "ca_cert_pem": ca.certPEM,
-            "ca_key_pem": ca.keyPEM
+            "h2_mitm": false
         ]
 
         guard let data = try? JSONSerialization.data(withJSONObject: config),

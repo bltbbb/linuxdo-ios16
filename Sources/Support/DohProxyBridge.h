@@ -19,6 +19,9 @@ int doh_proxy_get_port(void);
 
 /// 新建一份 CA，返回 JSON：{"ok":true,"cert_pem":"...","key_pem":"..."}。
 /// 调用方需用 doh_proxy_free_string 释放。
+/// 取编译进库里的内置 CA 证书（PEM）。MITM 叶证书都由它签发。
+/// 调用方需用 doh_proxy_free_string 释放。
+char *doh_proxy_get_embedded_ca_pem(void);
 char *doh_proxy_generate_ca(void);
 
 /// 按域名签发 MITM 叶证书，返回 JSON：{"ok":true,"pem":"..."}。
