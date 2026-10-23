@@ -36,7 +36,7 @@ final class DiscourseClient {
         NetworkSettings.customBaseURL ?? defaultBaseURL
     }
     private let defaultBaseURL: URL
-    private let session: URLSession
+    private var session: URLSession
     private let decoder = JSONDecoder()
     private let csrfCache = CSRFCache()
     private let apiKeyBox = APIKeyBox()
@@ -47,8 +47,25 @@ final class DiscourseClient {
         apiKeyBox.set(key)
     }
 
+    /// 走本地 DoH + ECH 代理时的端口；nil 表示不走代理。
+    private var proxyPort: Int?
+
     init(baseURL: URL = AppConfig.baseURL) {
         self.defaultBaseURL = baseURL
+        self.session = Self.makeSession(proxyPort: nil)
+    }
+
+    /// 切换本地代理：非 nil 时所有请求经 127.0.0.1:port，由 Rust 代理用 ECH 出去。
+    func setProxyPort(_ port: Int?) {
+        guard port != proxyPort else { return }
+        proxyPort = port
+        session.invalidateAndCancel()
+        session = Self.makeSession(proxyPort: port)
+    }
+
+    var isUsingProxy: Bool { proxyPort != nil }
+
+    private static func makeSession(proxyPort: Int?) -> URLSession {
         let cfg = URLSessionConfiguration.default
         cfg.httpCookieStorage = HTTPCookieStorage.shared
         // 自动挂载关掉：直连和 stream 都绕开 URLSession，Cookie 统一由 decorate 手动加，
@@ -60,7 +77,18 @@ final class DiscourseClient {
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         cfg.urlCache = nil
         cfg.httpAdditionalHeaders = ["User-Agent": AppConfig.userAgent]
-        self.session = URLSession(configuration: cfg)
+
+        if let port = proxyPort {
+            cfg.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable as String: true,
+                kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
+                kCFNetworkProxiesHTTPPort as String: port,
+                "HTTPSEnable": true,
+                "HTTPSProxy": "127.0.0.1",
+                "HTTPSPort": port
+            ]
+        }
+        return URLSession(configuration: cfg)
     }
 
     // MARK: - URL / headers
@@ -162,7 +190,7 @@ final class DiscourseClient {
 
         // 优先走 DoH + IP 直连（绕 DNS 污染）；失败就回退系统 DNS 的 URLSession。
         var directFailure: String?
-        if directBox.isAvailable {
+        if directBox.isAvailable && proxyPort == nil {
             do {
                 let direct = try await DirectTransport.shared.send(req)
                 await RequestLog.shared.record(

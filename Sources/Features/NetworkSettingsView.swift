@@ -1,24 +1,45 @@
 import SwiftUI
+import UIKit
 
-/// 网络设置：一键实测、自定义反代地址、手动指定服务器 IP。
-///
-/// 站点走 Cloudflare，中间设备对握手里的 SNI 做精确匹配并 RST，
-/// 所以「换哪个 IP 都不通」。客户端已经用带尾点的 SNI 绕开这件事，
-/// 正常情况下这里什么都不用填。
+/// 网络设置：安全直连（DoH + ECH）、一键实测、自定义反代、UA 覆盖、服务器 IP。
 struct NetworkSettingsView: View {
 
     @Environment(\.dismiss) private var dismiss
 
     @State private var input: String = NetworkSettings.customIPs.joined(separator: ", ")
     @State private var baseURLInput: String = NetworkSettings.customBaseURL?.absoluteString ?? ""
+    @State private var uaInput: String = NetworkSettings.customUserAgent ?? ""
     @State private var status: String?
     @State private var testing = false
-
-    @State private var uaInput: String = NetworkSettings.customUserAgent ?? ""
+    @State private var secureDirect = DohProxyService.shared.isRunning
+    @State private var shareItem: ShareItem?
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Toggle("安全直连（DoH + ECH）", isOn: $secureDirect)
+                        .onChange(of: secureDirect) { applySecureDirect($0) }
+                    Button {
+                        shareCA()
+                    } label: {
+                        Label("安装根证书", systemImage: "checkmark.seal")
+                    }
+                } header: {
+                    Text("安全直连")
+                } footer: {
+                    Text("开启后所有请求经本机代理，用 ECH 加密 ClientHello 出网，中间设备看不到 linux.do，绕开域名阻断。\n\n首次使用：点「安装根证书」→ 存到「文件」→ 点开安装描述文件 → 设置 → 通用 → 关于本机 → 证书信任设置 → 为该证书打开完全信任。")
+                }
+
+                if let status = status {
+                    Section {
+                        Text(status)
+                            .font(.footnote.monospaced())
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+
                 Section {
                     Button {
                         runDiagnose()
@@ -36,16 +57,7 @@ struct NetworkSettingsView: View {
                 } header: {
                     Text("连通性")
                 } footer: {
-                    Text("DoH 解析 → TLS 握手 → 取一次 /session/csrf.json。\n显示 HTTP 状态码就说明链路已通；显示「被 Cloudflare 挑战拦截」说明要重新导入带 cf_clearance 的 Cookie。")
-                }
-
-                if let status = status {
-                    Section {
-                        Text(status)
-                            .font(.footnote.monospaced())
-                            .foregroundColor(.secondary)
-                            .textSelection(.enabled)
-                    }
+                    Text("DoH 解析 → TLS 握手 → 取一次 /session/csrf.json。显示 HTTP 状态码说明链路已通；显示「被 Cloudflare 挑战拦截」说明还缺有效的 cf_clearance。")
                 }
 
                 Section {
@@ -57,7 +69,7 @@ struct NetworkSettingsView: View {
                 } header: {
                     Text("自定义 API 根地址（可选）")
                 } footer: {
-                    Text("留空就用官方 https://linux.do。填自建反代（例如自己的 VPS 反代）时，Cookie 要按该域名重新登录。")
+                    Text("留空就用官方 https://linux.do。填自建反代时，Cookie 要按该域名重新登录。")
                 }
 
                 Section {
@@ -70,7 +82,7 @@ struct NetworkSettingsView: View {
                 } header: {
                     Text("User-Agent（可选）")
                 } footer: {
-                    Text("Cloudflare 的 cf_clearance 与 User-Agent 绑定。要从浏览器复用 cf_clearance，这里必须填那个浏览器**一模一样**的 UA。留空用内置的 Safari UA。")
+                    Text("Cloudflare 的 cf_clearance 与 User-Agent 绑定。要复用浏览器签发的 cf_clearance，这里必须填那个浏览器一模一样的 UA。留空用内置的 Safari UA。")
                 }
 
                 Section {
@@ -83,7 +95,7 @@ struct NetworkSettingsView: View {
                 } header: {
                     Text("服务器 IP（可选）")
                 } footer: {
-                    Text("一般不用填，客户端自己用 DoH 解析并挑能连通的地址。多个用逗号分隔，留空则自动。\n\nTLS 的 SNI 与 HTTP 的 Host 仍然是 linux.do，证书照常校验——这里只换「连到哪个 IP」，不降低任何安全性。")
+                    Text("一般不用填。开启安全直连后，寻址由本地代理的 DoH 负责。多个用逗号分隔，留空则自动。")
                 }
 
                 Section {
@@ -105,6 +117,9 @@ struct NetworkSettingsView: View {
                     }
                 }
             }
+            .sheet(item: $shareItem) { item in
+                ActivityView(url: item.url)
+            }
             .navigationTitle("网络设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -114,6 +129,36 @@ struct NetworkSettingsView: View {
             }
         }
     }
+
+    // MARK: - 安全直连
+
+    private func applySecureDirect(_ enabled: Bool) {
+        if enabled {
+            if let port = DohProxyService.shared.start(host: "linux.do") {
+                DiscourseClient.shared.setProxyPort(port)
+                status = "安全直连已启动\n本地代理 127.0.0.1:\(port)\n若仍被挑战，请确认根证书已安装并完全信任。"
+            } else {
+                secureDirect = false
+                DiscourseClient.shared.setProxyPort(nil)
+                status = "启动失败：Rust 代理没能起来，查看 Xcode 日志里的 doh_proxy 输出。"
+            }
+        } else {
+            DohProxyService.shared.stop()
+            DiscourseClient.shared.setProxyPort(nil)
+            status = "安全直连已关闭，回到系统网络。"
+        }
+    }
+
+    private func shareCA() {
+        guard let ca = DohProxyService.shared.rootCA(),
+              let url = DohProxyService.shared.makeProfile(ca: ca) else {
+            status = "生成根证书失败"
+            return
+        }
+        shareItem = ShareItem(url: url)
+    }
+
+    // MARK: - 其它
 
     private func runDiagnose() {
         testing = true
@@ -152,4 +197,19 @@ struct NetworkSettingsView: View {
         let baseLine = NetworkSettings.customBaseURL.map { "反代：\($0.absoluteString)" } ?? "反代：官方 linux.do"
         status = "已保存\n\(ipLine)\n\(baseLine)\n\n返回列表下拉刷新。"
     }
+}
+
+private struct ShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+private struct ActivityView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
