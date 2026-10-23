@@ -318,15 +318,21 @@ final class DiscourseClient {
     }
 
     /// POST 表单，返回原始响应。4xx 不抛错——调用方要读 body 判断语义。
+    /// `accept` 用于覆盖默认的 `application/json`：Discourse 有些 action 只渲染 HTML，
+    /// 用 JSON 去协商会直接 404。
     func postFormRaw(
         _ path: String,
         fields: [String: String],
-        withCSRF: Bool
+        withCSRF: Bool,
+        accept: String? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         guard let url = makeURL(path) else { throw DiscourseError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         decorate(&req)
+        if let accept = accept {
+            req.setValue(accept, forHTTPHeaderField: "Accept")
+        }
         req.setValue(
             "application/x-www-form-urlencoded; charset=utf-8",
             forHTTPHeaderField: "Content-Type"
@@ -364,12 +370,28 @@ final class DiscourseClient {
             "auth_redirect": redirect
         ]
 
-        var (data, http) = try await postFormRaw("/user-api-key/new", fields: fields, withCSRF: true)
-        if http.statusCode == 403 || http.statusCode == 422 {
-            (data, http) = try await postFormRaw("/user-api-key/new", fields: fields, withCSRF: false)
+        // 这个 action 只渲染 HTML。必须用浏览器式 Accept，
+        // 否则 Rails 格式协商找不到 JSON 模板，直接返回 404「找不到请求的 URL 或资源」。
+        let htmlAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        var (data, http) = try await postFormRaw(
+            "/user-api-key/new", fields: fields, withCSRF: true, accept: htmlAccept
+        )
+        if http.statusCode == 403 {
+            // 有些站点该 action 豁免 CSRF，去掉 token 再试一次
+            (data, http) = try await postFormRaw(
+                "/user-api-key/new", fields: fields, withCSRF: false, accept: htmlAccept
+            )
+        }
+        if http.statusCode == 404 || http.statusCode == 406 {
+            (data, http) = try await postFormRaw(
+                "/user-api-key/new", fields: fields, withCSRF: true, accept: "application/json"
+            )
         }
         guard http.statusCode < 400 else {
-            throw DiscourseError.http(http.statusCode, Self.message(from: data))
+            throw DiscourseError.http(
+                http.statusCode,
+                Self.message(from: data) + "（POST /user-api-key/new）"
+            )
         }
 
         let html = String(data: data, encoding: .utf8) ?? ""

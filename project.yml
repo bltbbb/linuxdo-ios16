@@ -25,15 +25,15 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.linuxdoclient
         PRODUCT_NAME: LinuxDoClient
-        MARKETING_VERSION: "1.0.5"
-        CURRENT_PROJECT_VERSION: "5"
-        # Info.plist 由 XcodeGen 依据下方 info.properties 生成，不参与资源拷贝
+        MARKETING_VERSION: "1.0.6"
+        CURRENT_PROJECT_VERSION: "6"
+        # Info.plist �?XcodeGen 依据下方 info.properties 生成，不参与资源拷贝
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: LINUX DO
-        CFBundleShortVersionString: "1.0.5"
-        CFBundleVersion: "5"
+        CFBundleShortVersionString: "1.0.6"
+        CFBundleVersion: "6"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -43,7 +43,7 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
           NSAllowsArbitraryLoadsInWebContent: true
-        # User API Key 授权完成后由站点 302 回这个 scheme
+        # User API Key 授权完成后由站点 302 回这�?scheme
         CFBundleURLTypes:
           - CFBundleURLName: com.example.linuxdoclient
             CFBundleURLSchemes:
