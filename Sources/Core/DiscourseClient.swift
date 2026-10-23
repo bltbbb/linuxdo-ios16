@@ -269,41 +269,60 @@ final class DiscourseClient {
     // MARK: - Device Authorization Grant（与原 app 相同的登录方式）
 
     /// 第一步：申请设备码。用户拿 user_code 去浏览器授权。
+    ///
+    /// 关于 CSRF：Discourse 的 `/login/*` 命名空间并不总是豁免 CSRF。缺 token 时
+    /// Rails 抛 `InvalidAuthenticityToken`，Discourse 把它渲染成
+    /// 403「您没有权限查看请求的资源。」——所以先不带 token 试，403/422 再带 token 重试。
     func requestDeviceCode(clientId: String, scopes: [String]) async throws -> DeviceCodeResponse {
-        try await postFormDecodable(
-            "/login/device/code",
-            fields: [
-                "client_id": clientId,
-                "scopes": scopes.joined(separator: ","),
-                "application_name": DeviceAuthConfig.applicationName
-            ],
-            withCSRF: false,
-            as: DeviceCodeResponse.self
-        )
+        let fields: [String: String] = [
+            "client_id": clientId,
+            "scopes": scopes.joined(separator: ","),
+            "application_name": DeviceAuthConfig.applicationName
+        ]
+
+        var (data, http) = try await postFormRaw("/login/device/code", fields: fields, withCSRF: false)
+        if http.statusCode == 403 || http.statusCode == 422 {
+            (data, http) = try await postFormRaw("/login/device/code", fields: fields, withCSRF: true)
+        }
+        guard http.statusCode < 400 else {
+            throw DiscourseError.http(http.statusCode, Self.message(from: data))
+        }
+        do {
+            return try decoder.decode(DeviceCodeResponse.self, from: data)
+        } catch {
+            throw DiscourseError.decoding("响应不是设备码 JSON：" + Self.snippet(data))
+        }
     }
 
     /// 第二步：轮询换 token。授权未完成时返回 `error = authorization_pending`。
     func pollDeviceToken(clientId: String, deviceCode: String) async throws -> DeviceTokenResponse {
-        try await postFormDecodable(
-            "/login/oauth/access_token",
-            fields: [
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                "device_code": deviceCode,
-                "client_id": clientId
-            ],
-            withCSRF: false,
-            as: DeviceTokenResponse.self
-        )
+        let fields: [String: String] = [
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": deviceCode,
+            "client_id": clientId
+        ]
+
+        var (data, http) = try await postFormRaw("/login/oauth/access_token", fields: fields, withCSRF: false)
+        if http.statusCode == 403 {
+            (data, http) = try await postFormRaw("/login/oauth/access_token", fields: fields, withCSRF: true)
+        }
+        // 轮询阶段 400 属正常语义（authorization_pending），必须解析而不是抛错
+        if http.statusCode >= 500 {
+            throw DiscourseError.http(http.statusCode, Self.message(from: data))
+        }
+        do {
+            return try decoder.decode(DeviceTokenResponse.self, from: data)
+        } catch {
+            throw DiscourseError.decoding("轮询响应无法解析：" + Self.snippet(data))
+        }
     }
 
-    /// POST 表单并解码 JSON。
-    /// 轮询期间 400 / 428 属于正常语义，不能当错误抛，交给调用方读 `error` 字段。
-    func postFormDecodable<T: Decodable>(
+    /// POST 表单，返回原始响应。4xx 不抛错——调用方要读 body 判断语义。
+    func postFormRaw(
         _ path: String,
         fields: [String: String],
-        withCSRF: Bool = false,
-        as type: T.Type
-    ) async throws -> T {
+        withCSRF: Bool
+    ) async throws -> (Data, HTTPURLResponse) {
         guard let url = makeURL(path) else { throw DiscourseError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -316,15 +335,13 @@ final class DiscourseClient {
             req.setValue(try await csrfToken(), forHTTPHeaderField: "X-CSRF-Token")
         }
         req.httpBody = Self.formEncode(fields).data(using: .utf8)
-        let (data, http) = try await send(req)
-        if http.statusCode >= 500 {
-            throw DiscourseError.http(http.statusCode, Self.message(from: data))
-        }
-        do {
-            return try decoder.decode(T.self, from: data)
-        } catch {
-            throw DiscourseError.decoding(String(describing: error))
-        }
+        return try await send(req)
+    }
+
+    /// 响应体片段，用于把看不懂的解码错误变成人话。
+    static func snippet(_ data: Data) -> String {
+        let text = String(data: data.prefix(300), encoding: .utf8) ?? "（非文本响应）"
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - feeds
