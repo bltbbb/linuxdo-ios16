@@ -1,0 +1,43 @@
+name: Probe Site
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe linux.do endpoints
+        run: |
+          set +e
+          UA='Mozilla/5.0 (iPhone; CPU iPhone OS 16_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.3 Mobile/15E148 Safari/604.1'
+
+          show() {
+            local label="$1"; shift
+            echo "──────────────────────────────────────────────"
+            echo "### $label"
+            local out
+            out=$(curl -sS -X "$1" -H "User-Agent: $UA" -H "Accept: application/json, text/html;q=0.9" \
+                  -H "X-Requested-With: XMLHttpRequest" \
+                  -w "\n__CODE__%{http_code}__TYPE__%{content_type}" \
+                  --max-time 25 -L --compressed "$2" ${3:+--data "$3"} 2>&1)
+            local code type body
+            code=$(printf '%s' "$out" | sed -n 's/.*__CODE__\([0-9]*\)__TYPE__.*/\1/p' | tail -1)
+            type=$(printf '%s' "$out" | sed -n 's/.*__TYPE__//p' | tail -1)
+            body=$(printf '%s' "$out" | sed 's/__CODE__[0-9]*__TYPE__.*//')
+            echo "status=$code  type=$type"
+            printf '%s' "$body" | head -c 600
+            echo
+          }
+
+          show "GET /about.json" GET "https://linux.do/about.json"
+          show "GET /site/basic-info.json" GET "https://linux.do/site/basic-info.json"
+          show "GET /latest.json" GET "https://linux.do/latest.json"
+          show "GET /session/csrf.json" GET "https://linux.do/session/csrf.json"
+          show "GET /user-api-key/new (GET 试探)" GET "https://linux.do/user-api-key/new"
+          show "POST /user-api-key/new" POST "https://linux.do/user-api-key/new" \
+            "application_name=LinuxDoClient&client_id=com.example.linuxdoclient&scopes=read,write&public_key=-----BEGIN%20PUBLIC%20KEY-----%0AMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA%0A-----END%20PUBLIC%20KEY-----&nonce=abcdef1234&auth_redirect=linuxdoclient%3A%2F%2Fauth"
+          show "POST /login/device/code" POST "https://linux.do/login/device/code" \
+            "client_id=com.example.linuxdoclient&scopes=read,write"
+          show "GET /user-api-key/revoke" GET "https://linux.do/user-api-key/revoke"
