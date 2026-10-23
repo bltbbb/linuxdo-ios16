@@ -277,6 +277,39 @@ final class DirectTransport {
             lines.append("  CFNetwork stream：\(result.2)")
         }
 
+        // Cloudflare 的挑战往往只针对部分路径，先把能直接读的路径找出来。
+        lines.append("")
+        lines.append("路径探测（104.20.16.234）：")
+        let paths = ["/latest.json", "/site.json", "/session/current.json", "/session/csrf.json"]
+        var pathResults: [String: String] = [:]
+        await withTaskGroup(of: (String, String).self) { group in
+            for path in paths {
+                group.addTask {
+                    guard let target = URL(string: "https://\(host)\(path)") else {
+                        return (path, "地址错误")
+                    }
+                    var probe = URLRequest(url: target)
+                    probe.httpMethod = "GET"
+                    probe.setValue(AppConfig.userAgent, forHTTPHeaderField: "User-Agent")
+                    if let cookie = Self.cookieHeader(for: host) {
+                        probe.setValue(cookie, forHTTPHeaderField: "Cookie")
+                    }
+                    do {
+                        let (_, response) = try await StreamTransport.send(
+                            probe, url: target, host: host, ip: "104.20.16.234", port: 443, timeout: 6
+                        )
+                        return (path, "\(response.statusCode)")
+                    } catch {
+                        return (path, error.localizedDescription)
+                    }
+                }
+            }
+            for await (path, result) in group { pathResults[path] = result }
+        }
+        for path in paths {
+            lines.append("  \(path) → \(pathResults[path] ?? "?")")
+        }
+
         lines.append("")
         guard let probeURL = URL(string: "https://\(host)/session/csrf.json") else {
             return lines.joined(separator: "\n")
