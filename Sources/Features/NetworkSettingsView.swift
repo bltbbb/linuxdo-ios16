@@ -14,6 +14,8 @@ struct NetworkSettingsView: View {
     @State private var status: String?
     @State private var testing = false
 
+    @State private var uaInput: String = NetworkSettings.customUserAgent ?? ""
+
     var body: some View {
         NavigationStack {
             Form {
@@ -59,6 +61,19 @@ struct NetworkSettingsView: View {
                 }
 
                 Section {
+                    TextEditor(text: $uaInput)
+                        .frame(minHeight: 60)
+                        .font(.caption.monospaced())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .accessibilityLabel("User-Agent")
+                } header: {
+                    Text("User-Agent（可选）")
+                } footer: {
+                    Text("Cloudflare 的 cf_clearance 与 User-Agent 绑定。要从浏览器复用 cf_clearance，这里必须填那个浏览器**一模一样**的 UA。留空用内置的 Safari UA。")
+                }
+
+                Section {
                     TextEditor(text: $input)
                         .frame(minHeight: 80)
                         .font(.caption.monospaced())
@@ -80,8 +95,10 @@ struct NetworkSettingsView: View {
                     Button(role: .destructive) {
                         input = ""
                         baseURLInput = ""
+                        uaInput = ""
                         NetworkSettings.clear()
                         NetworkSettings.customBaseURL = nil
+                        NetworkSettings.customUserAgent = nil
                         status = "已清空，恢复默认"
                     } label: {
                         Label("清空并恢复默认", systemImage: "trash")
@@ -108,6 +125,8 @@ struct NetworkSettingsView: View {
     }
 
     private func save() {
+        NetworkSettings.customUserAgent = uaInput
+
         let trimmedBase = baseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedBase.isEmpty {
             NetworkSettings.customBaseURL = nil

@@ -286,6 +286,10 @@ final class DirectTransport {
         var request = URLRequest(url: probeURL)
         request.httpMethod = "GET"
         request.setValue(AppConfig.userAgent, forHTTPHeaderField: "User-Agent")
+        if let cookie = Self.cookieHeader(for: host) {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
+        lines.append("Cookie：\(Self.cookieNames(for: host))")
 
         let started = Date()
         do {
@@ -316,6 +320,9 @@ final class DirectTransport {
         var request = URLRequest(url: probeURL)
         request.httpMethod = "GET"
         request.setValue(AppConfig.userAgent, forHTTPHeaderField: "User-Agent")
+        if let cookie = Self.cookieHeader(for: host) {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
         let started = Date()
         do {
             let (_, response) = try await StreamTransport.send(
@@ -329,6 +336,20 @@ final class DirectTransport {
         } catch {
             return String(format: "%.2fs ", Date().timeIntervalSince(started)) + error.localizedDescription
         }
+    }
+
+    /// 诊断用：直接从 Cookie 存储里取，模拟真实请求带上的凭据。
+    static func cookieHeader(for host: String) -> String? {
+        guard let url = URL(string: "https://\(host)") else { return nil }
+        let cookies = HTTPCookieStorage.shared.cookies(for: url) ?? []
+        guard !cookies.isEmpty else { return nil }
+        return HTTPCookie.requestHeaderFields(with: cookies)["Cookie"]
+    }
+
+    static func cookieNames(for host: String) -> String {
+        guard let url = URL(string: "https://\(host)") else { return "无" }
+        let names = (HTTPCookieStorage.shared.cookies(for: url) ?? []).map { $0.name }.sorted()
+        return names.isEmpty ? "无" : names.joined(separator: ",")
     }
 
     /// 只做握手、不发任何数据，报告耗时与结果。

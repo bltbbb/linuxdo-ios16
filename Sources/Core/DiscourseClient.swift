@@ -51,7 +51,9 @@ final class DiscourseClient {
         self.defaultBaseURL = baseURL
         let cfg = URLSessionConfiguration.default
         cfg.httpCookieStorage = HTTPCookieStorage.shared
-        cfg.httpShouldSetCookies = true
+        // 自动挂载关掉：直连和 stream 都绕开 URLSession，Cookie 统一由 decorate 手动加，
+        // 打开自动挂载只会在 URLSession 路径上造成重复。
+        cfg.httpShouldSetCookies = false
         cfg.httpCookieAcceptPolicy = .always
         cfg.timeoutIntervalForRequest = 12
         cfg.timeoutIntervalForResource = 20
@@ -74,6 +76,13 @@ final class DiscourseClient {
         req.setValue(AppConfig.userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+
+        // 直连和 stream 两条路都绕开 URLSession，自动 Cookie 不生效，
+        // 所以这里统一手动挂上；URLSession 侧也关掉了自动挂载，避免重复。
+        if let cookie = currentCookieHeader() {
+            req.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
+
         if let key = apiKeyBox.get(), !key.isEmpty {
             req.setValue(key, forHTTPHeaderField: "User-Api-Key")
         }

@@ -47,4 +47,26 @@ enum NetworkSettings {
     static func clear() {
         UserDefaults.standard.removeObject(forKey: key)
     }
+
+    private static let userAgentKey = "custom-user-agent"
+
+    /// 自定义 User-Agent。
+    ///
+    /// Cloudflare 的 `cf_clearance` 与 UA 绑定，要复用浏览器导出的 clearance，
+    /// UA 必须和那个浏览器完全一致。
+    static var customUserAgent: String? {
+        get {
+            let raw = (UserDefaults.standard.string(forKey: userAgentKey) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return raw.isEmpty ? nil : raw
+        }
+        set {
+            let value = newValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if value.isEmpty {
+                UserDefaults.standard.removeObject(forKey: userAgentKey)
+            } else {
+                UserDefaults.standard.set(value, forKey: userAgentKey)
+            }
+        }
+    }
 }

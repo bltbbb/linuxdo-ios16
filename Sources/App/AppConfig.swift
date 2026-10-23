@@ -10,7 +10,14 @@ enum AppConfig {
     static let appVersion = "1.0.0"
 
     /// 原 app 强依赖 Cloudflare 前置，UA 必须足够像浏览器，否则可能被 403。
-    static let userAgent: String = {
+    ///
+    /// Cloudflare 的 `cf_clearance` 与 User-Agent 绑定：要复用浏览器导出的
+    /// clearance，UA 必须和那个浏览器一模一样，所以在网络设置里可以覆盖。
+    static var userAgent: String {
+        NetworkSettings.customUserAgent ?? defaultUserAgent
+    }
+
+    private static let defaultUserAgent: String = {
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let ver = "\(os.majorVersion)_\(os.minorVersion)"
         return "Mozilla/5.0 (iPhone; CPU iPhone OS \(ver) like Mac OS X) "
