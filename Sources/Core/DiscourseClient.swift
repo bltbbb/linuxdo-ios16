@@ -344,6 +344,48 @@ final class DiscourseClient {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // MARK: - User API Key（RSA，Discourse 经典方案）
+
+    /// 第一步：`POST /user-api-key/new`，从返回的页面里取出 `payload`，
+    /// 拼成需要用户在浏览器打开的授权地址。
+    func requestUserApiKey(
+        publicKeyPEM: String,
+        nonce: String,
+        clientId: String,
+        scopes: [String],
+        redirect: String
+    ) async throws -> URL {
+        let fields: [String: String] = [
+            "application_name": DeviceAuthConfig.applicationName,
+            "client_id": clientId,
+            "scopes": scopes.joined(separator: ","),
+            "public_key": publicKeyPEM,
+            "nonce": nonce,
+            "auth_redirect": redirect
+        ]
+
+        var (data, http) = try await postFormRaw("/user-api-key/new", fields: fields, withCSRF: true)
+        if http.statusCode == 403 || http.statusCode == 422 {
+            (data, http) = try await postFormRaw("/user-api-key/new", fields: fields, withCSRF: false)
+        }
+        guard http.statusCode < 400 else {
+            throw DiscourseError.http(http.statusCode, Self.message(from: data))
+        }
+
+        let html = String(data: data, encoding: .utf8) ?? ""
+        guard let payload = PayloadExtractor.extract(from: html) else {
+            throw DiscourseError.decoding("响应里找不到 payload：" + Self.snippet(data))
+        }
+
+        guard var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            throw DiscourseError.badURL
+        }
+        comps.path = "/user-api-key/authorize"
+        comps.queryItems = [URLQueryItem(name: "payload", value: payload)]
+        guard let url = comps.url else { throw DiscourseError.badURL }
+        return url
+    }
+
     // MARK: - feeds
 
     struct FeedPage {

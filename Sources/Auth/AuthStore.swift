@@ -1,22 +1,27 @@
 import Foundation
 import Combine
+import Security
 
 /// 会话状态机。
 ///
-/// 主路径是 OAuth Device Grant（API Key），与系统 WebKit 无关；
-/// 网页登录只作为兜底保留。
+/// 主路径：Discourse User API Key（RSA）—— 浏览器授权一次，之后用 `User-Api-Key` 直连。
+/// 备选：Device Grant（站点可能未启用）、网页登录、账号密码。
 @MainActor
 final class AuthStore: ObservableObject {
 
     @Published private(set) var currentUser: CurrentUser?
     @Published private(set) var isBusy = false
-    @Published private(set) var isPolling = false
+    @Published private(set) var isWaitingForBrowser = false
+    @Published private(set) var authorizeURL: URL?
     @Published private(set) var deviceCode: DeviceCodeResponse?
+    @Published private(set) var isPolling = false
     @Published var errorMessage: String?
     @Published var needsSecondFactor = false
 
     private let client: DiscourseClient
     private var pollTask: Task<Void, Never>?
+    private var rsaMaterial: RSAKeyPair.Material?
+    private var pendingNonce: String?
 
     init(client: DiscourseClient = .shared) {
         self.client = client
@@ -47,7 +52,105 @@ final class AuthStore: ObservableObject {
         }
     }
 
-    // MARK: - Device Grant 登录（主路径）
+    // MARK: - User API Key（浏览器授权）
+
+    func beginUserApiKeyLogin() async {
+        isBusy = true
+        errorMessage = nil
+        defer { isBusy = false }
+
+        guard let material = RSAKeyPair.generate() else {
+            errorMessage = "无法生成 RSA 密钥对"
+            return
+        }
+        rsaMaterial = material
+
+        let nonce = RSAKeyPair.randomNonce()
+        pendingNonce = nonce
+
+        do {
+            let url = try await client.requestUserApiKey(
+                publicKeyPEM: material.publicKeyPEM,
+                nonce: nonce,
+                clientId: DeviceAuthConfig.clientId,
+                scopes: DeviceAuthConfig.scopes,
+                redirect: DeviceAuthConfig.authRedirect
+            )
+            authorizeURL = url
+            isWaitingForBrowser = true
+        } catch {
+            var message = error.localizedDescription
+            if let diagnostics = await diagnosticsSuffix() {
+                message += "\n\n" + diagnostics
+            }
+            errorMessage = message
+            rsaMaterial = nil
+            pendingNonce = nil
+        }
+    }
+
+    /// 处理 `linuxdoclient://auth?payload=...&nonce=...` 回调。
+    func handleAuthCallback(url: URL) async {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        let items = components.queryItems ?? []
+
+        let payload = items.first { $0.name == "payload" }?.value
+        let nonce = items.first { $0.name == "nonce" }?.value
+
+        guard let payload = payload, !payload.isEmpty else {
+            errorMessage = "授权回调里没有 payload"
+            return
+        }
+        guard let material = rsaMaterial else {
+            errorMessage = "私钥已丢失，请重新发起授权"
+            return
+        }
+        if let nonce = nonce, let expected = pendingNonce, nonce != expected {
+            errorMessage = "nonce 不匹配，已中止（可能是伪造回调）"
+            return
+        }
+
+        guard let clear = RSAKeyPair.decrypt(base64: payload, privateKey: material.privateKey) else {
+            errorMessage = "payload 解密失败：请确认站点把 payload 用 PKCS#1 v1.5 加密"
+            return
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: clear) as? [String: Any] else {
+            errorMessage = "payload 不是 JSON：\(String(data: clear.prefix(200), encoding: .utf8) ?? "")"
+            return
+        }
+        guard let key = object["key"] as? String, !key.isEmpty else {
+            errorMessage = "payload 里没有 key 字段"
+            return
+        }
+
+        TokenStore.save(key)
+        client.setApiKey(key)
+
+        do {
+            currentUser = try await client.currentUser()
+        } catch {
+            currentUser = nil
+        }
+
+        if currentUser != nil {
+            authorizeURL = nil
+            isWaitingForBrowser = false
+            pendingNonce = nil
+            rsaMaterial = nil
+            errorMessage = nil
+        } else {
+            errorMessage = "密钥已保存，但 /session/current.json 未返回用户"
+        }
+    }
+
+    func cancelUserApiKeyLogin() {
+        authorizeURL = nil
+        isWaitingForBrowser = false
+        pendingNonce = nil
+        rsaMaterial = nil
+    }
+
+    // MARK: - Device Grant（站点可能未启用）
 
     func beginDeviceLogin() async {
         isBusy = true
@@ -114,10 +217,9 @@ final class AuthStore: ObservableObject {
                         self.errorMessage = "授权码已过期，请重新开始"
                         return
                     default:
-                        continue   // authorization_pending
+                        continue
                     }
                 } catch {
-                    // 网络抖动：继续轮询直到超时
                     continue
                 }
             }
@@ -155,7 +257,7 @@ final class AuthStore: ObservableObject {
         }
     }
 
-    // MARK: - 表单登录（仅在没有 device grant 的站点上使用）
+    // MARK: - 表单登录（兜底）
 
     func signIn(account: String, password: String, secondFactorCode: String? = nil) async {
         let trimmed = account.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -210,6 +312,10 @@ final class AuthStore: ObservableObject {
         needsSecondFactor = false
         deviceCode = nil
         isPolling = false
+        authorizeURL = nil
+        isWaitingForBrowser = false
+        rsaMaterial = nil
+        pendingNonce = nil
         errorMessage = nil
     }
 

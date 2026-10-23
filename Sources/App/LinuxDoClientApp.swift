@@ -9,6 +9,10 @@ struct LinuxDoClientApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(auth)
+                .onOpenURL { url in
+                    // User API Key 授权完成后，站点会 302 到 linuxdoclient://auth?payload=...
+                    Task { await auth.handleAuthCallback(url: url) }
+                }
         }
     }
 }

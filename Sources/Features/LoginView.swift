@@ -10,7 +10,7 @@ struct LoginView: View {
     var body: some View {
         NavigationStack {
             Form {
-                deviceSection
+                apiKeySection
 
                 if let message = auth.errorMessage {
                     Section {
@@ -35,10 +35,15 @@ struct LoginView: View {
                     } label: {
                         Label("账号密码登录", systemImage: "person.badge.key")
                     }
+                    Button {
+                        Task { await auth.beginDeviceLogin() }
+                    } label: {
+                        Label("设备码登录", systemImage: "key.horizontal")
+                    }
                 } header: {
                     Text("其他方式")
                 } footer: {
-                    Text("这两种都依赖浏览器会话：网页登录需要 WebKit 能正常渲染登录页，账号密码登录需要站点未启用交互式校验。仅在设备码登录不可用时使用。")
+                    Text("设备码登录需要站点开启 user api key device authorization；网页登录需要 WebKit 能渲染登录页；账号密码登录需要站点未启用交互式校验。")
                 }
             }
             .navigationTitle("LINUX DO")
@@ -52,57 +57,53 @@ struct LoginView: View {
     }
 
     @ViewBuilder
-    private var deviceSection: some View {
+    private var apiKeySection: some View {
         Section {
-            if let code = auth.deviceCode {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("用浏览器打开下面的地址，输入代码后授权：")
+            if let url = auth.authorizeURL {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("下一步：在浏览器里登录并点「授权」，完成后会自动回到 app。")
                         .font(.footnote)
                         .foregroundColor(.secondary)
 
-                    Text(code.userCode)
-                        .font(.system(size: 34, weight: .bold, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .textSelection(.enabled)
-
-                    Text(code.verificationUri)
-                        .font(.footnote)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .center)
-
                     Button {
-                        if let url = code.browserURL {
-                            UIApplication.shared.open(url)
-                        }
+                        UIApplication.shared.open(url)
                     } label: {
-                        Label("在浏览器中打开", systemImage: "safari")
+                        Label("在浏览器中打开授权页", systemImage: "safari")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
 
-                    HStack(spacing: 8) {
-                        if auth.isPolling {
+                    HStack {
+                        if auth.isWaitingForBrowser {
                             ProgressView()
-                            Text("等待授权…").font(.footnote).foregroundColor(.secondary)
-                        } else {
-                            Text("未在等待授权").font(.footnote).foregroundColor(.secondary)
+                            Text("等待授权回调…")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
                         }
                         Spacer()
-                        Button("取消") { auth.cancelDeviceLogin() }
+                        Button("取消") { auth.cancelUserApiKeyLogin() }
                             .font(.footnote)
                     }
+
+                    DisclosureGroup("授权页地址") {
+                        Text(url.absoluteString)
+                            .font(.caption2)
+                            .monospaced()
+                            .textSelection(.enabled)
+                    }
+                    .font(.footnote)
                 }
                 .padding(.vertical, 6)
             } else {
                 Button {
-                    Task { await auth.beginDeviceLogin() }
+                    Task { await auth.beginUserApiKeyLogin() }
                 } label: {
                     HStack {
                         Spacer()
                         if auth.isBusy {
                             ProgressView()
                         } else {
-                            Label("设备码登录", systemImage: "key.horizontal").bold()
+                            Label("浏览器授权登录", systemImage: "person.badge.key.fill").bold()
                         }
                         Spacer()
                     }
@@ -112,14 +113,14 @@ struct LoginView: View {
         } header: {
             Text("登录 linux.do")
         } footer: {
-            if auth.deviceCode == nil {
-                Text("与原版 app 相同的 OAuth 设备授权流程。拿到 API Key 后直连接口，不使用 WebKit、不依赖 cookie。")
+            if auth.authorizeURL == nil {
+                Text("与原版 app 相同的 User API Key 流程：生成密钥对 → 浏览器授权 → 拿到 API Key 直连接口。不使用 WebKit、不依赖 cookie。")
             }
         }
     }
 }
 
-/// 账号密码登录，独立成页，避免和主路径混在一起。
+/// 账号密码登录，独立成页。
 struct PasswordLoginView: View {
 
     enum Field: Hashable {

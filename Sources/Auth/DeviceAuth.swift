@@ -16,6 +16,10 @@ enum DeviceAuthConfig {
     static let clientId = "com.example.linuxdoclient"
     static let scopes = ["read", "write", "notifications", "session_info"]
     static let applicationName = "LinuxDoClient"
+
+    /// User API Key 授权完成后，服务端 302 到这个自定义 scheme。
+    /// 必须与 Info.plist 的 CFBundleURLSchemes 一致。
+    static let authRedirect = "linuxdoclient://auth"
 }
 
 struct DeviceCodeResponse: Decodable {
