@@ -25,15 +25,15 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.linuxdoclient
         PRODUCT_NAME: LinuxDoClient
-        MARKETING_VERSION: "1.0.11"
-        CURRENT_PROJECT_VERSION: "11"
+        MARKETING_VERSION: "1.0.12"
+        CURRENT_PROJECT_VERSION: "12"
         # Info.plist 由 XcodeGen 依据下方 info.properties 生成，不参与资源拷贝
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: LINUX DO
-        CFBundleShortVersionString: "1.0.11"
-        CFBundleVersion: "11"
+        CFBundleShortVersionString: "1.0.12"
+        CFBundleVersion: "12"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

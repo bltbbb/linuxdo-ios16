@@ -13,12 +13,14 @@ import Security
 ///
 /// 关键点：整个过程不碰 WKWebView，不需要 cookie 会话，也不需要 CSRF。
 enum DeviceAuthConfig {
-    /// Discourse 用 client_id 区分客户端，bundle id 足够。
-    static let clientId = "com.example.linuxdoclient"
-    /// 与原版二进制里出现的 scope 集合对齐（原版只出现 read / write / notifications / user，
-    /// 没有 session_info）。多申请一个不存在的 scope 会被判非法，整个请求 403。
+    /// 复刻原版：client_id 直接沿用原版 bundle id。
+    /// 站点若按 client_id 做白名单，只有这个值能通过。
+    static let clientId = "org.linuxdo.community"
+
+    /// 与原版二进制里出现的 scope 集合对齐（read / write / notifications / user）；
+    /// 多申请一个站点不认的 scope 会被判非法，整个请求 403。
     static let scopes = ["read", "write", "notifications"]
-    static let applicationName = "LinuxDoClient"
+    static let applicationName = "LINUX DO"
 
 }
 
