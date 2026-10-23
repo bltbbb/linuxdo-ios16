@@ -35,6 +35,12 @@ final class DiscourseClient {
     private let session: URLSession
     private let decoder = JSONDecoder()
     private let csrfCache = CSRFCache()
+    private let apiKeyBox = APIKeyBox()
+
+    /// 登录后设置 user API key；之后所有请求自动带 `User-Api-Key` 头。
+    func setApiKey(_ key: String?) {
+        apiKeyBox.set(key)
+    }
 
     init(baseURL: URL = AppConfig.baseURL) {
         self.baseURL = baseURL
@@ -63,6 +69,9 @@ final class DiscourseClient {
         req.setValue(AppConfig.userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+        if let key = apiKeyBox.get(), !key.isEmpty {
+            req.setValue(key, forHTTPHeaderField: "User-Api-Key")
+        }
     }
 
     private static func formEncode(_ fields: [String: String]) -> String {
@@ -257,6 +266,67 @@ final class DiscourseClient {
         }
     }
 
+    // MARK: - Device Authorization Grant（与原 app 相同的登录方式）
+
+    /// 第一步：申请设备码。用户拿 user_code 去浏览器授权。
+    func requestDeviceCode(clientId: String, scopes: [String]) async throws -> DeviceCodeResponse {
+        try await postFormDecodable(
+            "/login/device/code",
+            fields: [
+                "client_id": clientId,
+                "scopes": scopes.joined(separator: ","),
+                "application_name": DeviceAuthConfig.applicationName
+            ],
+            withCSRF: false,
+            as: DeviceCodeResponse.self
+        )
+    }
+
+    /// 第二步：轮询换 token。授权未完成时返回 `error = authorization_pending`。
+    func pollDeviceToken(clientId: String, deviceCode: String) async throws -> DeviceTokenResponse {
+        try await postFormDecodable(
+            "/login/oauth/access_token",
+            fields: [
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_code": deviceCode,
+                "client_id": clientId
+            ],
+            withCSRF: false,
+            as: DeviceTokenResponse.self
+        )
+    }
+
+    /// POST 表单并解码 JSON。
+    /// 轮询期间 400 / 428 属于正常语义，不能当错误抛，交给调用方读 `error` 字段。
+    func postFormDecodable<T: Decodable>(
+        _ path: String,
+        fields: [String: String],
+        withCSRF: Bool = false,
+        as type: T.Type
+    ) async throws -> T {
+        guard let url = makeURL(path) else { throw DiscourseError.badURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        decorate(&req)
+        req.setValue(
+            "application/x-www-form-urlencoded; charset=utf-8",
+            forHTTPHeaderField: "Content-Type"
+        )
+        if withCSRF {
+            req.setValue(try await csrfToken(), forHTTPHeaderField: "X-CSRF-Token")
+        }
+        req.httpBody = Self.formEncode(fields).data(using: .utf8)
+        let (data, http) = try await send(req)
+        if http.statusCode >= 500 {
+            throw DiscourseError.http(http.statusCode, Self.message(from: data))
+        }
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            throw DiscourseError.decoding(String(describing: error))
+        }
+    }
+
     // MARK: - feeds
 
     struct FeedPage {
@@ -306,5 +376,25 @@ actor CSRFCache {
 
     func set(_ newValue: String?) {
         token = newValue
+    }
+}
+
+/// 持有 user API key 的小容器。
+/// `decorate` 是同步函数，所以这里用同步锁；不要在 async 上下文里直接调用 lock/unlock。
+final class APIKeyBox: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var value: String?
+
+    func get() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ newValue: String?) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
     }
 }
