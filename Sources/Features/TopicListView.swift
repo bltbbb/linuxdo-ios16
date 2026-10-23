@@ -95,6 +95,7 @@ struct TopicListView: View {
 
     @EnvironmentObject private var auth: AuthStore
     @StateObject private var viewModel = TopicListViewModel()
+    @State private var showsNetworkSettings = false
 
     var body: some View {
         NavigationStack {
@@ -134,6 +135,11 @@ struct TopicListView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
                         Text(auth.displayName)
+                        Button {
+                            showsNetworkSettings = true
+                        } label: {
+                            Label("网络设置", systemImage: "network")
+                        }
                         Button("退出登录", role: .destructive) {
                             Task { await auth.signOut() }
                         }
@@ -160,6 +166,9 @@ struct TopicListView: View {
                 if viewModel.topics.isEmpty {
                     await viewModel.load(reset: true)
                 }
+            }
+            .sheet(isPresented: $showsNetworkSettings) {
+                NetworkSettingsView()
             }
         }
     }

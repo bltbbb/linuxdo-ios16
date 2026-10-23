@@ -32,19 +32,76 @@ final class DirectTransport {
             throw TransportError.badURL
         }
         let port = url.port ?? 443
-        let ips = try await DoHResolver.shared.resolve(host)
 
+        // 候选顺序：用户手动指定 > DoH 解析结果 + 同段邻居扩展
+        var seeds = NetworkSettings.customIPs
+        if seeds.isEmpty {
+            seeds = try await DoHResolver.shared.resolve(host)
+        }
+        let candidates = Self.expandNeighbours(seeds)
+        guard !candidates.isEmpty else {
+            throw TransportError.connect("没有可用的服务器地址")
+        }
+
+        // 并发探测：每个候选各自有硬超时，谁先打通就用谁。
+        // 单点被封锁时，同段邻居往往还通。
+        let probeTimeout = min(timeout, 4)
         var lastError: Error?
-        for ip in ips {
-            do {
-                return try await roundTrip(
-                    request, url: url, host: host, ip: ip, port: port, timeout: timeout
-                )
-            } catch {
-                lastError = error
+
+        let raced = await withTaskGroup(
+            of: Result<(Data, HTTPURLResponse), Error>.self,
+            returning: Result<(Data, HTTPURLResponse), Error>?.self
+        ) { group in
+            for ip in candidates.prefix(20) {
+                group.addTask {
+                    do {
+                        return .success(try await self.roundTrip(
+                            request, url: url, host: host, ip: ip, port: port, timeout: probeTimeout
+                        ))
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+            }
+
+            var winner: Result<(Data, HTTPURLResponse), Error>?
+            while let outcome = await group.next() {
+                if case .success = outcome {
+                    winner = outcome
+                    group.cancelAll()
+                    break
+                }
+                if case .failure(let error) = outcome { lastError = error }
+            }
+            return winner
+        }
+
+        if case .success(let payload) = raced {
+            return payload
+        }
+        throw lastError ?? TransportError.connect("所有候选地址均不可达（\(candidates.count) 个）")
+    }
+
+    /// 把解析结果扩展成同 /24 段的邻居候选。
+    /// Cloudflare 同一段内的边缘节点通常都服务同一个站点，单点被封时邻居常可用。
+    static func expandNeighbours(_ seeds: [String]) -> [String] {
+        var result: [String] = []
+        for seed in seeds where !result.contains(seed) {
+            result.append(seed)
+        }
+
+        for seed in seeds.prefix(3) where !seed.contains(":") {
+            let parts = seed.split(separator: ".")
+            guard parts.count == 4, let last = Int(parts[3]) else { continue }
+            let prefix = parts.prefix(3).joined(separator: ".")
+            for offset in [-4, -3, -2, -1, 1, 2, 3, 4, 6, 8] {
+                let candidate = last + offset
+                guard candidate > 0, candidate < 255 else { continue }
+                let value = "\(prefix).\(candidate)"
+                if !result.contains(value) { result.append(value) }
             }
         }
-        throw lastError ?? TransportError.connect("解析到的 IP 全部不可用")
+        return result
     }
 
     // MARK: - 单次连接
