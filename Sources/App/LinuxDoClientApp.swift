@@ -20,7 +20,7 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if auth.isLoggedIn {
+            if auth.isLoggedIn || auth.hasStoredSession {
                 TopicListView()
             } else {
                 LoginView()

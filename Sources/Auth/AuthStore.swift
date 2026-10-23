@@ -12,6 +12,8 @@ final class AuthStore: ObservableObject {
     @Published private(set) var currentUser: CurrentUser?
     @Published private(set) var isBusy = false
     @Published private(set) var isRestoring = false
+    /// 本地有凭据（cookie 或 api key）：允许直接进入主界面，不等网络校验。
+    @Published private(set) var hasStoredSession = false
     @Published private(set) var computerAuthorizationURL: URL?
     @Published private(set) var deviceCode: DeviceCodeResponse?
     @Published private(set) var isPolling = false
@@ -60,11 +62,27 @@ final class AuthStore: ObservableObject {
             }
         }
 
-        do {
-            currentUser = try await client.currentUser()
-            if currentUser != nil { cancelComputerLogin() }
-        } catch {
-            currentUser = nil
+        // 关键：有凭据就直接放行，不在启动时等网络。
+        // 校验丢到后台，失败也不阻塞界面。
+        hasStoredSession = client.hasSessionCookie || !(TokenStore.load() ?? "").isEmpty
+        guard hasStoredSession else { return }
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                if let user = try await self.client.currentUser() {
+                    self.currentUser = user
+                    self.cancelComputerLogin()
+                    self.errorMessage = nil
+                } else {
+                    self.hasStoredSession = false
+                    self.errorMessage = "上次的会话已失效，请重新登录"
+                }
+            } catch {
+                // 网络不通时保留凭据，让用户还能看到上次的列表缓存；
+                // 错误写进 errorMessage，界面上能查到原因。
+                self.errorMessage = "会话校验未完成（可继续浏览缓存）：\(error.localizedDescription)"
+            }
         }
     }
 
@@ -392,6 +410,7 @@ final class AuthStore: ObservableObject {
 
         TokenStore.clear()
         CookieVault.clear()
+        hasStoredSession = false
         client.setApiKey(nil)
         try? await client.logout()
         currentUser = nil
