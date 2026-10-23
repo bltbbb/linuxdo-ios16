@@ -1,5 +1,7 @@
 # LinuxDoClient —— iOS 16 原生客户端（重写）
 
+[![iOS Build](https://github.com/bltbbb/linuxdo-ios16/actions/workflows/ios-build.yml/badge.svg)](https://github.com/bltbbb/linuxdo-ios16/actions/workflows/ios-build.yml)
+
 目标：在 **iOS 16.3** 上获得 LINUX DO 的原生使用体验。
 
 前提结论（已用静态分析证实）：`org.linuxdo.community-1.0.2` 这个包**无法**降版本运行。
@@ -139,3 +141,23 @@ open LinuxDoClient.xcodeproj
   二次跳变，属已知表现。若要彻底解决，改成单 WebView 承载整帖。
 - **不做逆向**：本工程不包含、不修改、不依赖原 IPA 的任何二进制内容，
   只用公开的 Discourse HTTP 接口。
+
+---
+
+## 构建状态（CI 实测，非推测）
+
+GitHub Actions · `macos-15` · Xcode 16.4 · Swift 6.1.2 · iPhoneOS 18.5 SDK · 无签名编译：
+
+```
+** BUILD SUCCEEDED **
+
+Info.plist MinimumOSVersion = 16.0
+LC_BUILD_VERSION  platform 2 (iOS)  minos 16.0  sdk 18.5
+otool -L 中的 SwiftData / TipKit / Symbols / swiftObservation → (none)
+```
+
+工作流里有一条硬断言：`MinimumOSVersion` 必须等于 `16.0`，否则 job 直接失败。
+作用是不让构建悄悄漂到更高系统版本——这正是原 1.0.2 包踩的坑。
+
+CI 只做编译验证，不产出可分发的 ipa。要出包装机，本地加
+`-allowProvisioningUpdates` 并在 Xcode 里配好 Team 再 archive。
