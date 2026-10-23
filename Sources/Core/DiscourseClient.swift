@@ -36,6 +36,7 @@ final class DiscourseClient {
     private let decoder = JSONDecoder()
     private let csrfCache = CSRFCache()
     private let apiKeyBox = APIKeyBox()
+    private let directBox = DirectAvailabilityBox()
 
     /// 登录后设置 user API key；之后所有请求自动带 `User-Api-Key` 头。
     func setApiKey(_ key: String?) {
@@ -126,6 +127,39 @@ final class DiscourseClient {
 
     private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let cookieNames = HTTPCookieStorage.shared.cookies(for: req.url ?? baseURL)?.map { $0.name } ?? []
+
+        // 优先走 DoH + IP 直连（绕 DNS 污染）；失败就回退系统 DNS 的 URLSession。
+        if directBox.isAvailable {
+            do {
+                let direct = try await DirectTransport.shared.send(req)
+                directBox.markSucceeded()
+                await RequestLog.shared.record(
+                    method: req.httpMethod ?? "?",
+                    url: (req.url?.path ?? "?") + " [DoH直连]",
+                    status: direct.1.statusCode,
+                    note: AuthResponseDiagnostics.isAuthenticationPath(req.url?.path ?? "")
+                        ? AuthResponseDiagnostics.summary(
+                            request: req, response: direct.1, data: direct.0, cookieNames: cookieNames
+                        )
+                        : Self.message(from: direct.0)
+                )
+                if AuthResponseDiagnostics.isCloudflareChallenge(direct.1) {
+                    throw DiscourseError.cloudflare
+                }
+                return direct
+            } catch let error as DiscourseError {
+                throw error
+            } catch {
+                directBox.markFailed()
+                await RequestLog.shared.record(
+                    method: req.httpMethod ?? "?",
+                    url: (req.url?.path ?? "?") + " [直连失败]",
+                    status: -1,
+                    note: error.localizedDescription
+                )
+            }
+        }
+
         let result: (Data, URLResponse)
         do {
             result = try await session.data(for: req)
@@ -486,6 +520,31 @@ final class APIKeyBox: @unchecked Sendable {
     func set(_ newValue: String?) {
         lock.lock()
         value = newValue
+        lock.unlock()
+    }
+}
+
+/// 直连可用性开关：DoH 失败后冷却一段时间，避免每个请求都白等一次超时。
+final class DirectAvailabilityBox: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var disabledUntil = Date.distantPast
+
+    var isAvailable: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return Date() >= disabledUntil
+    }
+
+    func markSucceeded() {
+        lock.lock()
+        disabledUntil = Date.distantPast
+        lock.unlock()
+    }
+
+    func markFailed() {
+        lock.lock()
+        disabledUntil = Date().addingTimeInterval(60)
         lock.unlock()
     }
 }
