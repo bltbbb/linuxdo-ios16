@@ -11,6 +11,16 @@ enum AuthResponseDiagnostics {
         response.value(forHTTPHeaderField: "cf-mitigated")?.lowercased() == "challenge"
     }
 
+    /// WebView 路径拿不到响应头，只能靠正文判断挑战页。
+    static func isCloudflareChallenge(_ response: HTTPURLResponse, body: Data) -> Bool {
+        if isCloudflareChallenge(response) { return true }
+        guard response.statusCode == 403 || response.statusCode == 503 else { return false }
+        let head = String(data: body.prefix(4000), encoding: .utf8)?.lowercased() ?? ""
+        return head.contains("challenge-platform")
+            || head.contains("just a moment")
+            || head.contains("cf-chl")
+    }
+
     static func summary(
         request: URLRequest,
         response: HTTPURLResponse,
