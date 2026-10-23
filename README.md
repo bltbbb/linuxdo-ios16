@@ -159,5 +159,37 @@ otool -L 中的 SwiftData / TipKit / Symbols / swiftObservation → (none)
 工作流里有一条硬断言：`MinimumOSVersion` 必须等于 `16.0`，否则 job 直接失败。
 作用是不让构建悄悄漂到更高系统版本——这正是原 1.0.2 包踩的坑。
 
-CI 只做编译验证，不产出可分发的 ipa。要出包装机，本地加
-`-allowProvisioningUpdates` 并在 Xcode 里配好 Team 再 archive。
+`iOS Build` 只做编译验证；要出可安装的包，用 `Package IPA` 工作流（见下一节）。
+
+---
+
+## 安装（TrollStore / 巨魔）
+
+工作流 `Package IPA` 产出 `LinuxDoClient-<版本>-unsigned.ipa`，已做 ad-hoc 伪签名
+（`CodeDirectory flags = 0x2`），巨魔可直接安装。
+
+1. 打开仓库 **Actions → Package IPA → 最近一次运行**，页面底部下载 `LinuxDoClient-ipa`
+2. 解压得到 `.ipa`，传到手机（AirDrop / 文件 App / 局域网都行）
+3. 用 **TrollStore** 打开这个 ipa → **Install**
+
+巨魔走 CoreTrust 绕过，**不需要证书、不会 7 天掉签、永久有效**。
+没装巨魔的话用 Sideloadly + 免费 Apple ID，代价是每 7 天重签。
+
+### 为什么这个包能被巨魔接受
+
+| 检查项 | 结果 |
+|---|---|
+| `MinimumOSVersion` | 16.0 |
+| `LC_BUILD_VERSION` | `platform 2 (iOS)` / `minos 16.0` / `sdk 18.5` |
+| 强链接 iOS 17 独有库 | 无（`strong=13 / weak=12`，全部弱链接） |
+| Debug dylib | 无（Release 构建） |
+| 代码签名 | ad-hoc（`_CodeSignature/CodeResources` 存在） |
+
+CI 每次打包都会跑 `Scripts/check_ios16_links.py` 复核最后一项——一旦有人引入
+SwiftData / TipKit / Symbols / Observation 的强链接，构建直接失败。
+
+### 已知限制
+
+- 没配任何 entitlement，**收不到 APNs 推送**（推送要真实证书 + 服务端）
+- 无 App 图标与启动图（尚未加资源）
+- 只读 MVP：不能回帖、没有已读位置同步
