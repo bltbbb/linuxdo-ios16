@@ -69,18 +69,22 @@ enum TokenStore {
     private static let service = "com.example.linuxdoclient.credentials"
     private static let account = "user-api-key"
 
-    static func save(_ token: String) {
-        clear()
+    static func save(_ token: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+            kSecAttrAccount as String: account
+        ]
+        let updates: [String: Any] = [
             kSecValueData as String: Data(token.utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
         ]
-        let status = SecItemAdd(query as CFDictionary, nil)
-        if status != errSecSuccess {
-            NSLog("[TokenStore] 保存失败：\(status)")
+        var status = SecItemUpdate(query as CFDictionary, updates as CFDictionary)
+        if status == errSecItemNotFound {
+            status = SecItemAdd(query.merging(updates) { _, new in new } as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else {
+            throw DiscourseError.transport("无法保存登录密钥，钥匙串状态：\(status)")
         }
     }
 

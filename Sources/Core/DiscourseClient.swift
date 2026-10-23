@@ -72,36 +72,20 @@ final class DiscourseClient {
         if let key = apiKeyBox.get(), !key.isEmpty {
             req.setValue(key, forHTTPHeaderField: "User-Api-Key")
         }
-        // 显式回传 cookie：不依赖 URLSession 的自动管理，
-        // 否则 `_forum_session` 丢失时 CSRF 必然失败且毫无提示。
-        if let cookie = cookieHeader(for: req.url ?? baseURL) {
-            req.setValue(cookie, forHTTPHeaderField: "Cookie")
+        if let method = req.httpMethod, method != "GET", method != "HEAD" {
+            var origin = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+            origin?.path = ""
+            origin?.query = nil
+            origin?.fragment = nil
+            req.setValue(origin?.string, forHTTPHeaderField: "Origin")
+            req.setValue(makeURL("/login")?.absoluteString, forHTTPHeaderField: "Referer")
         }
     }
 
-    // MARK: - Cookie（手动管理）
-
-    /// 把响应里的 `Set-Cookie` 全部收进共享存储。
-    private func absorbCookies(_ response: HTTPURLResponse, url: URL) {
-        guard let fields = response.allHeaderFields as? [String: String] else { return }
-        for cookie in HTTPCookie.cookies(withResponseHeaderFields: fields, for: url) {
-            HTTPCookieStorage.shared.setCookie(cookie)
-        }
-    }
+    // MARK: - Cookie（由同一个 URLSession 自动接收和发送）
 
     private func currentCookies() -> [HTTPCookie] {
         HTTPCookieStorage.shared.cookies(for: baseURL) ?? []
-    }
-
-    private var hasForumSessionCookie: Bool {
-        currentCookies().contains { $0.name == "_forum_session" && !$0.value.isEmpty }
-    }
-
-    private func cookieHeader(for url: URL) -> String? {
-        guard let cookies = HTTPCookieStorage.shared.cookies(for: url), !cookies.isEmpty else {
-            return nil
-        }
-        return HTTPCookie.requestHeaderFields(with: cookies)["Cookie"]
     }
 
     /// 诊断用：列出当前 cookie 名。
@@ -111,9 +95,12 @@ final class DiscourseClient {
     }
 
     func resetCookies() {
-        for cookie in HTTPCookieStorage.shared.cookies ?? []
-        where cookie.domain.contains("linux.do") {
-            HTTPCookieStorage.shared.deleteCookie(cookie)
+        guard let host = baseURL.host?.lowercased() else { return }
+        for cookie in HTTPCookieStorage.shared.cookies ?? [] {
+            let domain = cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+            if host == domain || host.hasSuffix("." + domain) {
+                HTTPCookieStorage.shared.deleteCookie(cookie)
+            }
         }
     }
 
@@ -138,6 +125,7 @@ final class DiscourseClient {
     // MARK: - transport
 
     private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let cookieNames = HTTPCookieStorage.shared.cookies(for: req.url ?? baseURL)?.map { $0.name } ?? []
         let result: (Data, URLResponse)
         do {
             result = try await session.data(for: req)
@@ -154,19 +142,15 @@ final class DiscourseClient {
         guard let http = result.1 as? HTTPURLResponse else {
             throw DiscourseError.transport("无 HTTP 响应")
         }
-        absorbCookies(http, url: req.url ?? baseURL)
         await RequestLog.shared.record(
             method: req.httpMethod ?? "?",
             url: req.url?.path ?? "?",
             status: http.statusCode,
-            note: req.url?.path == "/session"
-                || req.url?.path.hasPrefix("/session/") == true
-                || req.url?.path.hasPrefix("/user-api-key") == true
-                || req.url?.path.hasPrefix("/login/") == true
-                ? "认证响应正文已省略"
+            note: AuthResponseDiagnostics.isAuthenticationPath(req.url?.path ?? "")
+                ? AuthResponseDiagnostics.summary(request: req, response: http, data: data, cookieNames: cookieNames)
                 : Self.message(from: data)
         )
-        if http.statusCode == 403, Self.message(from: data).isEmpty {
+        if AuthResponseDiagnostics.isCloudflareChallenge(http) {
             throw DiscourseError.cloudflare
         }
         return (data, http)
@@ -216,13 +200,19 @@ final class DiscourseClient {
 
     @discardableResult
     func postForm(_ path: String, fields: [String: String], withCSRF: Bool = true) async throws -> Data {
+        let token: String?
+        if withCSRF {
+            token = try await csrfToken()
+        } else {
+            token = nil
+        }
         guard let url = makeURL(path) else { throw DiscourseError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         decorate(&req)
         req.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        if withCSRF {
-            req.setValue(try await csrfToken(), forHTTPHeaderField: "X-CSRF-Token")
+        if let token = token {
+            req.setValue(token, forHTTPHeaderField: "X-CSRF-Token")
         }
         req.httpBody = Self.formEncode(fields).data(using: .utf8)
         let (data, http) = try await send(req)
@@ -247,37 +237,9 @@ final class DiscourseClient {
 
     // MARK: - session
 
-    /// 先打一次首页，让 `_forum_session` / `cf_clearance` cookie 落地，再取 CSRF。
-    ///
-    /// 顺序很重要：如果只取 CSRF 就直接 POST，token 绑定的 session 与随后
-    /// POST 携带的 cookie 可能不是同一个，Rails 会判 `InvalidAuthenticityToken`，
-    /// Discourse 把这种情况渲染成 403「您没有权限查看请求的资源。」
-    /// 建立一个新的匿名会话：清掉旧 cookie → GET 首页拿下 `_forum_session` → 取 CSRF。
-    ///
-    /// 三步必须落在同一个 cookie 罐里。`_forum_session` 一旦缺失、或与 CSRF token
-    /// 不属于同一个 session，Rails 会判 `InvalidAuthenticityToken`，Discourse 把它
-    /// 渲染成 403「您没有权限查看请求的资源。」——这就是表单登录反复失败的真因。
+    /// 刷新当前会话的 CSRF，不清空已有验证 Cookie 或两步验证会话。
     func warmUp() async throws {
-        resetCookies()
-
-        if let url = makeURL("/") {
-            var req = URLRequest(url: url)
-            req.httpMethod = "GET"
-            req.setValue(AppConfig.userAgent, forHTTPHeaderField: "User-Agent")
-            req.setValue(
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                forHTTPHeaderField: "Accept"
-            )
-            _ = try? await send(req)
-        }
-
         _ = try await csrfToken(forceRefresh: true)
-
-        guard hasForumSessionCookie else {
-            throw DiscourseError.transport(
-                "服务器未下发 _forum_session cookie，CSRF 必然对不上｜cookie=\(cookieDiagnostics())"
-            )
-        }
     }
 
     func currentUser() async throws -> CurrentUser? {
@@ -303,9 +265,16 @@ final class DiscourseClient {
     }
 
     func login(account: String, password: String, secondFactorCode: String? = nil) async throws -> LoginOutcome {
+        let previousKey = apiKeyBox.get()
+        var succeeded = false
+        defer { if !succeeded { setApiKey(previousKey) } }
+        // 账号密码登录使用 Cookie 会话，避免旧 API Key 干扰认证。
+        setApiKey(nil)
         try await warmUp()
 
-        var fields: [String: String] = ["login": account, "password": password]
+        var fields: [String: String] = [
+            "login": account, "password": password, "timezone": TimeZone.current.identifier
+        ]
         if let code = secondFactorCode?.trimmingCharacters(in: .whitespaces), !code.isEmpty {
             fields["second_factor_method"] = "1"   // 1 = TOTP
             fields["second_factor_code"] = code
@@ -315,7 +284,9 @@ final class DiscourseClient {
 
         if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let error = obj["error"] as? String, !error.isEmpty {
-            let needs2FA = error.lowercased().contains("two factor")
+            let needs2FA = obj["second_factor_required"] as? Bool == true
+                || obj["totp_enabled"] as? Bool == true
+                || error.lowercased().contains("two factor")
                 || error.lowercased().contains("second factor")
                 || error.contains("验证码")
             return LoginOutcome(
@@ -326,21 +297,20 @@ final class DiscourseClient {
         }
 
         if let user = try await currentUser() {
+            succeeded = true
             return LoginOutcome(success: true, secondFactorRequired: false, message: user.username)
         }
         return LoginOutcome(
             success: false,
             secondFactorRequired: false,
-            message: "账号或密码不正确｜cookie=\(cookieDiagnostics())"
+            message: "登录请求已完成，但未取得用户会话｜cookie=\(cookieDiagnostics())"
         )
     }
 
     func logout() async throws {
         _ = try? await postForm("/logout", fields: [:])
         await csrfCache.set(nil)
-        if let cookies = HTTPCookieStorage.shared.cookies {
-            cookies.forEach { HTTPCookieStorage.shared.deleteCookie($0) }
-        }
+        resetCookies()
     }
 
     // MARK: - 站点定制设备码登录（协议尚待验证）
@@ -435,7 +405,7 @@ final class DiscourseClient {
         nonce: String,
         clientId: String,
         scopes: [String],
-        redirect: String
+        redirect: String?
     ) throws -> URL {
         try UserApiKeyAuthorization.makeURL(
             baseURL: baseURL,

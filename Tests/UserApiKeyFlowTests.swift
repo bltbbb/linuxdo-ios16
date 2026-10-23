@@ -3,6 +3,43 @@ import Security
 @testable import LinuxDoClient
 
 final class UserApiKeyFlowTests: XCTestCase {
+    func testComputerAuthorizationHasNoRedirect() throws {
+        let url = try UserApiKeyAuthorization.makeURL(
+            baseURL: XCTUnwrap(URL(string: "https://example.com")),
+            applicationName: "测试客户端", publicKeyPEM: "测试公钥",
+            nonce: "测试随机值", clientId: "测试设备", scopes: ["read", "session_info"],
+            redirect: nil
+        )
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.path, "/user-api-key/new")
+        XCTAssertFalse(components.queryItems?.contains { $0.name == "auth_redirect" } == true)
+    }
+
+    func testComputerPayloadSurvivesPrivateKeyRestoration() throws {
+        let material = try XCTUnwrap(RSAKeyPair.generate())
+        let url = try callback(material, object: ["key": "测试密钥", "nonce": "正确随机值"])
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let encrypted = try XCTUnwrap(components.queryItems?.first { $0.name == "payload" }?.value)
+        var error: Unmanaged<CFError>?
+        let exported = try XCTUnwrap(SecKeyCopyExternalRepresentation(material.privateKey, &error)) as Data
+        let restored = try XCTUnwrap(RSAKeyPair.restore(privateKeyData: exported))
+        XCTAssertEqual(restored.publicKeyPEM, material.publicKeyPEM)
+
+        let json = try JSONSerialization.data(withJSONObject: ["payload": encrypted])
+        for input in ["\n" + encrypted + "\n", String(decoding: json, as: UTF8.self)] {
+            let payload = try UserApiKeyAuthorization.decodePayload(
+                input, expectedNonce: "正确随机值", privateKey: restored.privateKey
+            )
+            XCTAssertEqual(payload.key, "测试密钥")
+        }
+        XCTAssertThrowsError(try UserApiKeyAuthorization.decodePayload(
+            encrypted, expectedNonce: "另一授权", privateKey: restored.privateKey
+        ))
+        XCTAssertThrowsError(try UserApiKeyAuthorization.decodePayload(
+            "明文密钥", expectedNonce: "正确随机值", privateKey: restored.privateKey
+        ))
+    }
+
     func testAuthorizationURLPreservesPublicKeyAndSubpath() throws {
         let publicKey = "-----BEGIN RSA PUBLIC KEY-----\nAB+C/DE==\n-----END RSA PUBLIC KEY-----"
         let url = try UserApiKeyAuthorization.makeURL(

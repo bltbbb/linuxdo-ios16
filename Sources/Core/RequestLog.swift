@@ -2,8 +2,7 @@ import Foundation
 
 /// 环形请求日志，只存在内存里，用于真机排错。
 ///
-/// 训练/上线都不需要它，但排查"登录 403"这类问题时，
-/// 唯一可靠的办法就是看真实的 method / path / status / 响应体。
+/// 记录方法、路径、状态及脱敏诊断，用于区分会话错误与网络拦截。
 actor RequestLog {
 
     static let shared = RequestLog()

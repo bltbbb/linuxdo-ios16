@@ -1,19 +1,17 @@
 import Foundation
 import Combine
 import Security
-import AuthenticationServices
-import UIKit
 
 /// 会话状态机。
 ///
-/// 主路径：Discourse User API Key（RSA）—— 浏览器授权一次，之后用 `User-Api-Key` 直连。
-/// 备选：Device Grant（站点可能未启用）、网页登录、账号密码。
+/// 主路径：电脑完成 User API Key 授权，手机解密结果并直连接口。
+/// 登录页另提供原生账号密码入口；未验证的设备码和旧网页登录代码不在界面展示。
 @MainActor
-final class AuthStore: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
+final class AuthStore: ObservableObject {
 
     @Published private(set) var currentUser: CurrentUser?
     @Published private(set) var isBusy = false
-    @Published private(set) var isWaitingForBrowser = false
+    @Published private(set) var computerAuthorizationURL: URL?
     @Published private(set) var deviceCode: DeviceCodeResponse?
     @Published private(set) var isPolling = false
     @Published var errorMessage: String?
@@ -23,15 +21,13 @@ final class AuthStore: NSObject, ObservableObject, ASWebAuthenticationPresentati
     private var pollTask: Task<Void, Never>?
     private var rsaMaterial: RSAKeyPair.Material?
     private var pendingNonce: String?
-    private var browserSession: ASWebAuthenticationSession?
-    private var presentationWindow: UIWindow?
 
     init(client: DiscourseClient = .shared) {
         self.client = client
-        super.init()
     }
 
     var isLoggedIn: Bool { currentUser != nil }
+    var isWaitingForComputer: Bool { computerAuthorizationURL != nil }
 
     var displayName: String {
         guard let user = currentUser else { return "未登录" }
@@ -45,21 +41,28 @@ final class AuthStore: NSObject, ObservableObject, ASWebAuthenticationPresentati
         isBusy = true
         defer { isBusy = false }
 
+        if let pending = PendingComputerAuthorizationStore.load() {
+            rsaMaterial = pending.material
+            pendingNonce = pending.nonce
+            computerAuthorizationURL = try? computerURL(material: pending.material, nonce: pending.nonce)
+        }
+
         if let saved = TokenStore.load(), !saved.isEmpty {
             client.setApiKey(saved)
         }
 
         do {
             currentUser = try await client.currentUser()
+            if currentUser != nil { cancelComputerLogin() }
         } catch {
             currentUser = nil
         }
     }
 
-    // MARK: - User API Key（浏览器授权）
+    // MARK: - User API Key（电脑授权，手机不加载网页）
 
-    func beginUserApiKeyLogin() async {
-        guard !isBusy, !isWaitingForBrowser else { return }
+    func beginComputerLogin() {
+        guard !isBusy, !isWaitingForComputer else { return }
         cancelDeviceLogin()
         isBusy = true
         errorMessage = nil
@@ -75,102 +78,72 @@ final class AuthStore: NSObject, ObservableObject, ASWebAuthenticationPresentati
         pendingNonce = nonce
 
         do {
-            let url = try client.requestUserApiKey(
-                publicKeyPEM: material.publicKeyPEM,
-                nonce: nonce,
-                clientId: UserApiKeyConfig.clientId,
-                scopes: UserApiKeyConfig.scopes,
-                redirect: UserApiKeyConfig.authRedirect
-            )
-            guard let window = UIApplication.shared.connectedScenes
-                .compactMap({ $0 as? UIWindowScene })
-                .filter({ $0.activationState == .foregroundActive })
-                .flatMap({ $0.windows })
-                .first(where: { $0.isKeyWindow }) else {
-                throw DiscourseError.transport("没有可展示授权页面的窗口，请回到应用后重试")
-            }
-            presentationWindow = window
-            let browser = ASWebAuthenticationSession(
-                url: url,
-                callbackURLScheme: UserApiKeyConfig.callbackScheme
-            ) { [weak self] callbackURL, error in
-                Task { @MainActor [weak self] in
-                    guard let self = self, self.pendingNonce == nonce else { return }
-                    self.browserSession = nil
-                    self.presentationWindow = nil
-                    if let callbackURL = callbackURL {
-                        await self.handleAuthCallback(url: callbackURL)
-                    } else {
-                        self.cancelUserApiKeyLogin()
-                        if let error = error {
-                            if (error as? ASWebAuthenticationSessionError)?.code != .canceledLogin {
-                                self.errorMessage = "无法完成浏览器授权：\(error.localizedDescription)"
-                            }
-                        }
-                    }
-                }
-            }
-            browser.presentationContextProvider = self
-            browser.prefersEphemeralWebBrowserSession = false
-            browserSession = browser
-            isWaitingForBrowser = true
-            guard browser.start() else {
-                throw DiscourseError.transport("无法打开系统授权页面，请重试")
-            }
+            let url = try computerURL(material: material, nonce: nonce)
+            try PendingComputerAuthorizationStore.save(material: material, nonce: nonce)
+            computerAuthorizationURL = url
         } catch {
-            cancelUserApiKeyLogin()
+            cancelComputerLogin()
             errorMessage = error.localizedDescription
         }
     }
 
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        presentationWindow ?? ASPresentationAnchor()
+    private func computerURL(material: RSAKeyPair.Material, nonce: String) throws -> URL {
+        try client.requestUserApiKey(
+            publicKeyPEM: material.publicKeyPEM,
+            nonce: nonce,
+            clientId: UserApiKeyConfig.clientId,
+            scopes: UserApiKeyConfig.scopes,
+            redirect: nil
+        )
     }
 
-    /// nonce 必须来自解密后的 payload，不能仅检查 URL 中的可选参数。
-    func handleAuthCallback(url: URL) async {
-        guard !isBusy, isWaitingForBrowser,
+    /// 仅接收本次公钥加密的结果，不接收明文 API Key 或浏览器 Cookie。
+    func completeComputerLogin(encryptedResult: String) async {
+        guard !isBusy, isWaitingForComputer,
               let material = rsaMaterial, let nonce = pendingNonce else { return }
+        guard PendingComputerAuthorizationStore.load()?.nonce == nonce else {
+            cancelComputerLogin()
+            errorMessage = "本次授权已过期或无法读取，请重新生成链接"
+            return
+        }
         isBusy = true
+        errorMessage = nil
         defer { isBusy = false }
         do {
-            let payload = try UserApiKeyAuthorization.decodeCallback(
-                url,
-                expectedRedirect: UserApiKeyConfig.authRedirect,
+            let payload = try UserApiKeyAuthorization.decodePayload(
+                encryptedResult,
                 expectedNonce: nonce,
                 privateKey: material.privateKey
             )
-            // 消耗本次授权状态，阻止同一回调重复处理。
-            cancelUserApiKeyLogin()
             client.setApiKey(payload.key)
             guard let user = try await client.currentUser() else {
                 throw DiscourseError.unauthorized
             }
-            TokenStore.save(payload.key)
+            try TokenStore.save(payload.key)
             currentUser = user
+            cancelComputerLogin()
             needsSecondFactor = false
             errorMessage = nil
         } catch {
-            cancelUserApiKeyLogin()
+            // 网络或复制错误时保留私钥，让用户重试同一授权结果。
             client.setApiKey(TokenStore.load())
+            let diagnostics = await diagnosticsSuffix()
             errorMessage = "授权未完成：\(error.localizedDescription)"
+                + (diagnostics.map { "\n\n" + $0 } ?? "")
         }
     }
 
-    func cancelUserApiKeyLogin() {
-        isWaitingForBrowser = false
+    func cancelComputerLogin() {
+        computerAuthorizationURL = nil
         pendingNonce = nil
         rsaMaterial = nil
-        let browser = browserSession
-        browserSession = nil
-        browser?.cancel()
-        presentationWindow = nil
+        PendingComputerAuthorizationStore.clear()
     }
 
     // MARK: - Device Grant（站点可能未启用）
 
     func beginDeviceLogin() async {
-        guard !isBusy, !isWaitingForBrowser else { return }
+        guard !isBusy, !isWaitingForComputer else { return }
         isBusy = true
         errorMessage = nil
         defer { isBusy = false }
@@ -211,7 +184,7 @@ final class AuthStore: NSObject, ObservableObject, ASWebAuthenticationPresentati
                     )
 
                     if let access = token.accessToken, !access.isEmpty {
-                        TokenStore.save(access)
+                        try TokenStore.save(access)
                         self.client.setApiKey(access)
                         self.currentUser = try await self.client.currentUser()
                         self.deviceCode = nil
@@ -278,6 +251,8 @@ final class AuthStore: NSObject, ObservableObject, ASWebAuthenticationPresentati
     // MARK: - 表单登录（兜底）
 
     func signIn(account: String, password: String, secondFactorCode: String? = nil) async {
+        guard !isBusy, !isWaitingForComputer else { return }
+        cancelDeviceLogin()
         let trimmed = account.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !password.isEmpty else {
             errorMessage = "请输入账号和密码"
@@ -295,6 +270,7 @@ final class AuthStore: NSObject, ObservableObject, ASWebAuthenticationPresentati
                 secondFactorCode: secondFactorCode
             )
             if outcome.success {
+                TokenStore.clear()
                 currentUser = try await client.currentUser()
                 needsSecondFactor = false
                 errorMessage = nil
@@ -315,10 +291,48 @@ final class AuthStore: NSObject, ObservableObject, ASWebAuthenticationPresentati
         }
     }
 
+    // MARK: - 手动粘贴 API Key（保底路径）
+
+    func signInWithAPIKey(_ raw: String) async {
+        let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            errorMessage = "请先粘贴 API Key"
+            return
+        }
+
+        isBusy = true
+        errorMessage = nil
+        defer { isBusy = false }
+
+        let previous = TokenStore.load()
+        client.setApiKey(key)
+
+        do {
+            guard let user = try await client.currentUser() else {
+                client.setApiKey(previous)
+                errorMessage = "这个 Key 不被站点接受（/session/current.json 没有返回用户）"
+                return
+            }
+            try TokenStore.save(key)
+            currentUser = user
+            cancelComputerLogin()
+            cancelDeviceLogin()
+            needsSecondFactor = false
+            errorMessage = nil
+        } catch {
+            client.setApiKey(previous)
+            var message = "API Key 验证失败：\(error.localizedDescription)"
+            if let diagnostics = await diagnosticsSuffix() {
+                message += "\n\n" + diagnostics
+            }
+            errorMessage = message
+        }
+    }
+
     // MARK: - 退出
 
     func signOut() async {
-        cancelUserApiKeyLogin()
+        cancelComputerLogin()
         pollTask?.cancel()
         pollTask = nil
         isBusy = true
@@ -331,7 +345,6 @@ final class AuthStore: NSObject, ObservableObject, ASWebAuthenticationPresentati
         needsSecondFactor = false
         deviceCode = nil
         isPolling = false
-        isWaitingForBrowser = false
         rsaMaterial = nil
         pendingNonce = nil
         errorMessage = nil

@@ -8,45 +8,58 @@
 无法仅靠修改最低版本号支持 iOS 16.3。本工程使用 iOS 16 可用接口重新实现客户端。
 论坛基于 Discourse，但站点可能扩展认证协议，不能将上游文档视为全部站点行为。
 
-## 浏览器授权登录修复
+## 登录：在电脑上授权，手机不加载论坛网页
 
-原实现将授权入口写成 `POST /user-api-key/new`，随后尝试从 HTML 提取 payload，
-再跳转到 `/user-api-key/authorize`。这与标准 Discourse 的经典 User API Key 流程不符：
+iOS 16.3 上的论坛前端存在浏览器内核兼容问题，换成系统认证浏览器并不能解决。
+登录主路径现为电脑完成一次网站授权、手机接收加密结果：
 
-1. 客户端生成 RSA 密钥对、随机 nonce 和每个安装实例独立的 client ID。
-2. 系统认证浏览器 `ASWebAuthenticationSession` 打开 `GET /user-api-key/new`，查询参数携带公钥、nonce、权限和回调地址。
-3. 用户在网站登录并确认授权，由网页向 `POST /user-api-key` 提交。
-4. 系统认证会话接收 `discourse://auth_redirect?payload=...`，客户端解密 payload 并校验其中的 nonce。
-5. 使用返回的用户密钥查询 `/session/current.json`，成功后保存密钥并进入列表。
+1. 手机点“生成电脑授权链接”，生成 RSA 密钥对、随机 nonce 和本机 client ID。
+2. 将链接复制或分享到电脑，在电脑浏览器打开并登录论坛。
+3. 确认只读授权后，复制网页显示的整段加密结果。
+4. 回到手机，粘贴结果，点“完成授权并登录”。手机解密并校验 nonce，再请求当前用户信息。
+5. 验证成功后，用户密钥保存在钥匙串中，后续启动直接恢复。
 
-当前主流程申请 `read,session_info`，不申请依赖推送地址的 `notifications`。
-公钥中的 `+` 编码为 `%2B`，避免服务器按表单规则将其解释成空格。
-认证会话直接接收回调，不使用 `UIApplication.open` 加自定义 URL 注册来争抢回调。
-私钥和待验证 nonce 只在内存保留，授权中途应用进程被系统终止后需要重新发起。
+链接使用 `GET /user-api-key/new`，参数不包含 `auth_redirect`。
+上游 Discourse 在这种模式下支持直接显示可复制的 payload；无需手机接收浏览器回调，
+也不需要从电脑导出 Cookie 或明文 API Key。电脑确认授权时仍由网站处理正常的验证与权限检查。
+权限为 `read,session_info`；公钥中的加号编码成 `%2B`。
 
-日志含义：
+待完成授权的私钥及 nonce 保存在仅限本机的钥匙串记录中，恢复或导入时检查 24 小时有效期。
+切换应用、进程重启后可以继续；取消或完成后删除记录。复制错误或网络失败允许重试同一结果。
+输入支持纯 Base64 或带 `payload` 字段的 JSON，不接受明文密钥。
 
-- `/session/current.json` 的匿名 404 是未登录状态，不表示该接口不存在。
-- `/session/csrf.json` 返回 200 只表示取到了防跨站请求令牌，不表示登录成功。
-- 浏览器授权入口不需要先从原生网络会话取 CSRF，也不会再由客户端 POST 到 `/user-api-key/new`。
-- 认证端点正文不写入诊断日志；授权结果解码错误也不输出解密后的内容。
+账号密码登录仍作为备用入口，但网站拒绝原生请求时不会自动转到手机浏览器。
+设备码并不意味着无需浏览器：申请和轮询可以走 HTTP，用户授权通常仍需另一设备打开网页。
+原版 IPA 虽然含有 `/login/device/code` 和 `/login/oauth/access_token` 字符串，
+现有候选实现的完整协议尚未确认，因此未将其作为可用入口展示。
 
-站点仍需允许用户 API Key、所申请权限和回调地址。`discourse://auth_redirect` 是 Discourse 默认允许的地址，
-并不代表已经验证 linux.do 当前部署的允许列表。若网页提示回调不允许或用户无权授权，需要查看具体站点提示。
-系统认证浏览器与原生 URLSession 不共享全部浏览器状态；获得用户密钥也不保证绕过站点的 Cloudflare 校验。
+## 原生登录 403 的诊断
 
-回归用例位于 `Tests/UserApiKeyFlowTests.swift`，覆盖公钥查询参数编码、正确回调、nonce 不匹配或缺失、
-错误回调地址、重复 payload 和错误私钥。此次仅进行了静态检查，按要求未执行本地构建、测试或真机登录。
-原版 IPA 中存在 `/login/device/code` 和 `/login/oauth/access_token` 字符串，
-但备用设备码实现的请求字段及响应结构尚未核实，本次没有将其当作已经可用的登录方案。
+已有日志只能证明 `/session` 请求遭拒，不能证明密码错误、CSRF 错误或 Cloudflare 挑战：
 
-真机验收顺序：打开“浏览器授权登录” → 网站登录和确认授权 → 自动返回应用 → 当前用户查询成功 → 进入主题列表。
-还需检查取消后重新授权、重启恢复，以及权限被撤销后的行为。
+- `/session/current.json` 的匿名 404 是未登录状态。
+- `/session/csrf.json` 的 200 表示取得 CSRF 令牌，不代表登录已完成。
+- 不能仅凭一个 403 或 `Server: cloudflare` 判断存在交互式挑战。
 
-依据：[Discourse 授权规范](https://meta.discourse.org/t/user-api-keys-specification/48536)、
-[上游路由](https://github.com/discourse/discourse/blob/main/config/routes.rb)、
-[匿名会话处理](https://github.com/discourse/discourse/blob/main/app/controllers/session_controller.rb)、
-[苹果系统认证会话](https://developer.apple.com/documentation/authenticationservices/aswebauthenticationsession)。
+此次修正了原生请求流程：不再每次登录都清空 Cookie；统一由同一 URLSession 接收和发送 Cookie；
+刷新 CSRF 后再组装表单请求；补充同源 Origin 和 Referer；登录时不携带旧 API Key；
+两步验证重试保留会话，并读取结构化的二次验证标记。
+这些改动解决客户端会话处理问题，不代表已确定该设备 403 的唯一原因。
+
+新诊断保留响应 MIME 类型、`error_type`、`cf-mitigated: challenge`、`BAD CSRF` 标记、
+请求是否带 CSRF/Origin，以及发送前存储中的 Cookie 名称，不输出值或响应正文。
+若再出现拒绝，可以依据这些特征区分站点拒绝与挑战响应。
+
+站点仍需允许用户 API Key 和读取权限；电脑授权成功也不保证手机网络请求不受 Cloudflare 限制。
+当前未验证 linux.do 的实际站点授权策略，也没有进行真机登录。
+
+回归用例位于 `Tests/UserApiKeyFlowTests.swift` 和 `Tests/AuthResponseDiagnosticsTests.swift`，
+包括无回调授权链接、私钥恢复、加密结果导入、nonce 校验、错误密钥以及诊断脱敏。
+按要求未进行本地构建或测试执行。验收时还需检查取消重试、应用重启、授权被撤销和网络失败后的行为。
+
+依据：[Discourse 授权实现](https://github.com/discourse/discourse/blob/main/app/controllers/user_api_keys_controller.rb)、
+[会话处理](https://github.com/discourse/discourse/blob/main/app/controllers/session_controller.rb)、
+[CSRF 与拒绝访问处理](https://github.com/discourse/discourse/blob/main/app/controllers/application_controller.rb)。
 
 ---
 
@@ -62,7 +75,7 @@
 | `sensoryFeedback` | 无（可后续用 `UIImpactFeedbackGenerator`） |
 | TipKit | 无 |
 | Symbols framework | 无 |
-| User API Key + Device 授权流 | 系统浏览器 User API Key 授权；另保留网页登录备用入口 |
+| User API Key + Device 授权流 | 电脑授权后将加密结果交回手机；原生账号密码登录作为备用 |
 | MessageBus 实时推送 | **未实现**（见「未实现」） |
 
 三个 SwiftData 实体逐字段还原为 Core Data 实体：
@@ -96,7 +109,7 @@ LinuxDoClient/
         └── RichTextWebView.swift     渲染 Discourse `cooked` HTML
 ```
 
-零第三方依赖。使用 Foundation / SwiftUI / UIKit / WebKit / CoreData / Security / AuthenticationServices。
+零第三方依赖。使用 Foundation / SwiftUI / UIKit / WebKit / CoreData / Security。
 
 ---
 
@@ -140,7 +153,7 @@ open LinuxDoClient.xcodeproj
 
 ## 已实现
 
-- 系统浏览器 User API Key 授权链路（此次修正，待真机验证）
+- 电脑完成 User API Key 授权、手机导入加密结果（待真机验证）
 - Cookie 会话登录（含 TOTP 二次验证分支）
 - 冷启动会话恢复（`/session/current.json`）
 - 列表：最新 / 热门 / 未读，分页加载，下拉刷新
@@ -148,7 +161,7 @@ open LinuxDoClient.xcodeproj
 - 离线缓存：列表与站点信息落 Core Data，TTL 10 分钟，先出缓存再刷新
 - 草稿：本地 Core Data 草稿（`saveDraft` / `drafts` / `deleteDraft`）
 - Cloudflare 403 与常见错误的中文提示
-- 网页登录：内嵌 WKWebView 通过 Cloudflare 挑战，cookie 自动同步给原生请求
+- 登录入口不依赖手机 WebKit；旧网页登录辅助代码保留但不在登录页展示
 
 ## 未实现（按优先级）
 

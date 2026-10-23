@@ -5,9 +5,9 @@ import Security
 ///
 /// 流程：
 /// 1. 客户端生成 RSA 2048 密钥对 + 随机 nonce
-/// 2. 在系统认证浏览器中 GET `/user-api-key/new`，查询参数包含公钥等授权信息
-/// 3. 用户在浏览器里登录并点「授权」
-/// 4. 服务端回调 `auth_redirect?payload=...`，nonce 在加密 payload 内
+/// 2. 在电脑浏览器中 GET `/user-api-key/new`，查询参数包含公钥等授权信息
+/// 3. 用户在电脑登录并点「授权」
+/// 4. 将网站显示的加密结果交回手机，nonce 在加密 payload 内
 /// 5. 客户端用私钥做 RSA PKCS#1 v1.5 解密，得到 `{"key": "...", "nonce": "..."}`
 /// 6. 之后请求带 `User-Api-Key: <key>`
 ///
@@ -17,6 +17,18 @@ enum RSAKeyPair {
     struct Material {
         let privateKey: SecKey
         let publicKeyPEM: String
+    }
+
+    static func restore(privateKeyData: Data) -> Material? {
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate
+        ]
+        var error: Unmanaged<CFError>?
+        guard let privateKey = SecKeyCreateWithData(privateKeyData as CFData, attributes as CFDictionary, &error),
+              let publicKey = SecKeyCopyPublicKey(privateKey),
+              let der = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else { return nil }
+        return Material(privateKey: privateKey, publicKeyPEM: pem(der: der, label: "RSA PUBLIC KEY"))
     }
 
     static func generate(bits: Int = 2048) -> Material? {
@@ -89,9 +101,6 @@ enum UserApiKeyConfig {
 
     // 当前客户端只读；不申请需要推送地址的 notifications 权限。
     static let scopes = ["read", "session_info"]
-    // Discourse 默认允许此回调；站点管理员仍可自行调整允许列表。
-    static let authRedirect = "discourse://auth_redirect"
-    static let callbackScheme = "discourse"
 }
 
 enum UserApiKeyAuthorization {
@@ -102,7 +111,7 @@ enum UserApiKeyAuthorization {
         nonce: String,
         clientId: String,
         scopes: [String],
-        redirect: String
+        redirect: String?
     ) throws -> URL {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             throw DiscourseError.badURL
@@ -115,9 +124,12 @@ enum UserApiKeyAuthorization {
             URLQueryItem(name: "client_id", value: clientId),
             URLQueryItem(name: "scopes", value: scopes.joined(separator: ",")),
             URLQueryItem(name: "public_key", value: publicKeyPEM),
-            URLQueryItem(name: "nonce", value: nonce),
-            URLQueryItem(name: "auth_redirect", value: redirect)
+            URLQueryItem(name: "nonce", value: nonce)
         ]
+        // 不设置回调时，Discourse 会在电脑网页中显示可复制的加密结果。
+        if let redirect = redirect {
+            components.queryItems?.append(URLQueryItem(name: "auth_redirect", value: redirect))
+        }
         // Rails 按表单规则解析查询串；公钥中的加号必须编码，不能变成空格。
         components.percentEncodedQuery = components.percentEncodedQuery?
             .replacingOccurrences(of: "+", with: "%2B")
@@ -149,7 +161,29 @@ enum UserApiKeyAuthorization {
         guard values.count == 1, let encrypted = values.first?.value, !encrypted.isEmpty else {
             throw DiscourseError.decoding("授权回调缺少唯一的 payload")
         }
-        guard let data = RSAKeyPair.decrypt(base64: encrypted, privateKey: privateKey),
+        return try decodePayload(encrypted, expectedNonce: expectedNonce, privateKey: privateKey)
+    }
+
+    static func decodePayload(
+        _ text: String,
+        expectedNonce: String,
+        privateKey: SecKey
+    ) throws -> Payload {
+        let input = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 支持复制网页中的 Base64，或服务器 JSON 响应中的 payload 包装。
+        let encrypted: String
+        if input.hasPrefix("{"),
+           let data = input.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let value = object["payload"] as? String {
+            encrypted = value
+        } else {
+            encrypted = input
+        }
+        let compact = encrypted.components(separatedBy: .whitespacesAndNewlines).joined()
+        guard let cipher = Data(base64Encoded: compact),
+              cipher.count == SecKeyGetBlockSize(privateKey),
+              let data = RSAKeyPair.decrypt(base64: compact, privateKey: privateKey),
               let payload = try? JSONDecoder().decode(Payload.self, from: data),
               !payload.key.isEmpty else {
             throw DiscourseError.decoding("授权结果解密失败或缺少密钥")
@@ -158,5 +192,57 @@ enum UserApiKeyAuthorization {
             throw DiscourseError.decoding("授权结果 nonce 不匹配，请重新授权")
         }
         return payload
+    }
+}
+
+/// 暂存电脑授权所需私钥，切换应用或进程重启后仍能解密本次结果。
+enum PendingComputerAuthorizationStore {
+    private struct Record: Codable {
+        let privateKey: Data
+        let nonce: String
+        let createdAt: Date
+    }
+
+    private static var query: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "com.example.linuxdoclient.credentials",
+            kSecAttrAccount as String: "pending-computer-authorization"
+        ]
+    }
+
+    static func save(material: RSAKeyPair.Material, nonce: String) throws {
+        var error: Unmanaged<CFError>?
+        guard let data = SecKeyCopyExternalRepresentation(material.privateKey, &error) as Data? else {
+            throw DiscourseError.transport("无法保存本次授权私钥")
+        }
+        let record = Record(privateKey: data, nonce: nonce, createdAt: Date())
+        var attributes = query
+        attributes[kSecValueData as String] = try JSONEncoder().encode(record)
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        clear()
+        guard SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess else {
+            throw DiscourseError.transport("无法将待完成授权保存到钥匙串")
+        }
+    }
+
+    static func load() -> (material: RSAKeyPair.Material, nonce: String)? {
+        var attributes = query
+        attributes[kSecReturnData as String] = true
+        attributes[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(attributes as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        guard let record = try? JSONDecoder().decode(Record.self, from: data),
+              Date().timeIntervalSince(record.createdAt) < 24 * 60 * 60,
+              let material = RSAKeyPair.restore(privateKeyData: record.privateKey) else {
+            clear()
+            return nil
+        }
+        return (material, record.nonce)
+    }
+
+    static func clear() {
+        SecItemDelete(query as CFDictionary)
     }
 }
