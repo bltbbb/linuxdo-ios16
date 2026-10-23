@@ -13,6 +13,7 @@ struct NetworkSettingsView: View {
     @State private var testing = false
     @State private var secureDirect = DohProxyService.shared.isRunning
     @State private var shareItem: ShareItem?
+    @State private var challengePort: Int?
 
     var body: some View {
         NavigationStack {
@@ -25,10 +26,20 @@ struct NetworkSettingsView: View {
                     } label: {
                         Label("安装根证书", systemImage: "checkmark.seal")
                     }
+                    if let port = DohProxyService.shared.runningPort {
+                        Button {
+                            challengePort = port
+                        } label: {
+                            Label("通过 Cloudflare 验证", systemImage: "checkmark.shield")
+                        }
+                        Text("1. 先到 设置 → Wi-Fi → 当前网络 → 配置代理 → 手动，服务器填 127.0.0.1，端口填 \(port)\n2. 回到这里点上面这一行，等挑战页自己跑完\n3. 点页面右上角「完成」保存凭据，然后去 Wi-Fi 里把代理关掉")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 } header: {
                     Text("安全直连")
                 } footer: {
-                    Text("开启后所有请求经本机代理，用 ECH 加密 ClientHello 出网，中间设备看不到 linux.do，绕开域名阻断。\n\n首次使用：点「安装根证书」→ 存到「文件」→ 点开安装描述文件 → 设置 → 通用 → 关于本机 → 证书信任设置 → 为该证书打开完全信任。")
+                    Text("开启后原生请求经本机代理，用 ECH 加密 ClientHello 出网，中间设备看不到 linux.do。\n\n首次使用：点「安装根证书」→ 存到「文件」→ 点开安装描述文件 → 设置 → 通用 → 关于本机 → 证书信任设置 → 为该证书打开完全信任。\n\n如果仍被 Cloudflare 挑战，用上面的验证页让 WebKit 亲自过盾。")
                 }
 
                 if let status = status {
@@ -130,6 +141,12 @@ struct NetworkSettingsView: View {
             .sheet(item: $shareItem) { item in
                 ActivityView(url: item.url)
             }
+            .fullScreenCover(item: Binding(
+                get: { challengePort.map { ChallengeTarget(id: $0) } },
+                set: { challengePort = $0?.id }
+            )) { target in
+                ChallengeView(port: target.id)
+            }
             .navigationTitle("网络设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -228,4 +245,8 @@ private struct ActivityView: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
+private struct ChallengeTarget: Identifiable {
+    let id: Int
 }
