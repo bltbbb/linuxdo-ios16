@@ -49,8 +49,8 @@ final class DiscourseClient {
         cfg.httpCookieStorage = HTTPCookieStorage.shared
         cfg.httpShouldSetCookies = true
         cfg.httpCookieAcceptPolicy = .always
-        cfg.timeoutIntervalForRequest = 30
-        cfg.timeoutIntervalForResource = 60
+        cfg.timeoutIntervalForRequest = 12
+        cfg.timeoutIntervalForResource = 20
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         cfg.urlCache = nil
         cfg.httpAdditionalHeaders = ["User-Agent": AppConfig.userAgent]

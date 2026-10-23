@@ -28,6 +28,17 @@ struct LoginView: View {
     var body: some View {
         NavigationStack {
             Form {
+                if auth.isRestoring {
+                    Section {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("正在恢复上次的会话…")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+
                 cookieSection
                 apiKeySection
 

@@ -3,13 +3,14 @@ import Foundation
 /// 用 DoH（DNS over HTTPS）解析域名，绕开本地 DNS 污染。
 ///
 /// 原版 app 用 libcurl + `CURLOPT_DOH_URL` 做同样的事。这里不引入 C 依赖，
-/// 直接按 RFC 8484 构造/解析 DNS 报文，走系统 URLSession 请求国内可达的 DoH 端点。
+/// 直接按 RFC 8484 构造/解析 DNS 报文。多个端点**并发**查询，取最先成功的一个，
+/// 最坏等待时间等于单次超时（3 秒），而不是端点数量乘以超时。
 actor DoHResolver {
 
     static let shared = DoHResolver()
 
     /// 只放国内直连可达的端点；cloudflare / google 在不挂代理时不可用。
-    private let endpoints = [
+    private static let endpoints = [
         "https://dns.alidns.com/dns-query",
         "https://doh.pub/dns-query",
         "https://223.5.5.5/dns-query",
@@ -17,25 +18,23 @@ actor DoHResolver {
         "https://doh.360.cn/dns-query"
     ]
 
-    private var cache: [String: (ips: [String], expiresAt: Date)] = [:]
-    private let cacheTTL: TimeInterval = 300
-
-    private let session: URLSession = {
+    private static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 4
-        config.timeoutIntervalForResource = 6
+        config.timeoutIntervalForRequest = 3
+        config.timeoutIntervalForResource = 5
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: config)
     }()
 
+    private var cache: [String: (ips: [String], expiresAt: Date)] = [:]
+    private let cacheTTL: TimeInterval = 300
+
     enum ResolveError: LocalizedError {
         case allEndpointsFailed(String)
-        case emptyAnswer(String)
 
         var errorDescription: String? {
             switch self {
             case .allEndpointsFailed(let detail): return "DoH 解析失败：\(detail)"
-            case .emptyAnswer(let host): return "DoH 未返回 \(host) 的 A 记录"
             }
         }
     }
@@ -45,42 +44,66 @@ actor DoHResolver {
             return entry.ips
         }
 
-        var failures: [String] = []
-        for endpoint in endpoints {
-            do {
-                let ips = try await query(host: host, endpoint: endpoint)
-                if !ips.isEmpty {
-                    cache[host] = (ips, Date().addingTimeInterval(cacheTTL))
-                    return ips
+        let outcome = await withTaskGroup(
+            of: (String, Result<[String], Error>).self,
+            returning: (winner: [String], failures: [String]).self
+        ) { group in
+            for endpoint in Self.endpoints {
+                group.addTask {
+                    do {
+                        return (endpoint, .success(try await Self.query(host: host, endpoint: endpoint)))
+                    } catch {
+                        return (endpoint, .failure(error))
+                    }
                 }
-                failures.append("\(endpoint): 空应答")
-            } catch {
-                failures.append("\(endpoint): \(error.localizedDescription)")
             }
+
+            var failures: [String] = []
+            var winner: [String] = []
+            while let (endpoint, result) = await group.next() {
+                switch result {
+                case .success(let ips) where !ips.isEmpty:
+                    winner = ips
+                    group.cancelAll()
+                case .success:
+                    failures.append("\(endpoint): 空应答")
+                case .failure(let error):
+                    failures.append("\(endpoint): \(error.localizedDescription)")
+                }
+                if !winner.isEmpty { break }
+            }
+            return (winner, failures)
         }
-        throw ResolveError.allEndpointsFailed(failures.joined(separator: " | "))
+
+        if !outcome.winner.isEmpty {
+            cache[host] = (outcome.winner, Date().addingTimeInterval(cacheTTL))
+            return outcome.winner
+        }
+        throw ResolveError.allEndpointsFailed(
+            outcome.failures.isEmpty ? "全部端点无应答" : outcome.failures.joined(separator: " | ")
+        )
     }
 
     func invalidate(_ host: String) {
         cache.removeValue(forKey: host)
     }
 
-    // MARK: - 单次 DoH 查询
+    // MARK: - 单次 DoH 查询（无状态，可并发）
 
-    private func query(host: String, endpoint: String) async throws -> [String] {
+    private static func query(host: String, endpoint: String) async throws -> [String] {
         guard let url = URL(string: endpoint) else { return [] }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/dns-message", forHTTPHeaderField: "Content-Type")
         request.setValue("application/dns-message", forHTTPHeaderField: "Accept")
-        request.httpBody = Self.buildQuery(host: host)
+        request.httpBody = buildQuery(host: host)
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw ResolveError.allEndpointsFailed("HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
         }
-        return Self.parseAnswers(data)
+        return parseAnswers(data)
     }
 
     // MARK: - DNS 报文
@@ -118,7 +141,6 @@ actor DoHResolver {
         guard anCount > 0 else { return [] }
 
         var offset = 12
-        // 跳过 question 段
         for _ in 0..<qdCount {
             guard skipName(bytes, &offset) else { return [] }
             offset += 4

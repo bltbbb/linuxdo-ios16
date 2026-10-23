@@ -27,7 +27,7 @@ final class DirectTransport {
 
     private let queue = DispatchQueue(label: "io.linuxdo.direct-transport")
 
-    func send(_ request: URLRequest, timeout: TimeInterval = 20) async throws -> (Data, HTTPURLResponse) {
+    func send(_ request: URLRequest, timeout: TimeInterval = 12) async throws -> (Data, HTTPURLResponse) {
         guard let url = request.url, let host = url.host else {
             throw TransportError.badURL
         }

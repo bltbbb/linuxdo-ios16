@@ -11,6 +11,7 @@ final class AuthStore: ObservableObject {
 
     @Published private(set) var currentUser: CurrentUser?
     @Published private(set) var isBusy = false
+    @Published private(set) var isRestoring = false
     @Published private(set) var computerAuthorizationURL: URL?
     @Published private(set) var deviceCode: DeviceCodeResponse?
     @Published private(set) var isPolling = false
@@ -38,8 +39,8 @@ final class AuthStore: ObservableObject {
     // MARK: - 启动恢复
 
     func restoreSession() async {
-        isBusy = true
-        defer { isBusy = false }
+        isRestoring = true
+        defer { isRestoring = false }
 
         if let pending = PendingComputerAuthorizationStore.load() {
             rsaMaterial = pending.material
