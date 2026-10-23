@@ -51,6 +51,14 @@ final class AuthStore: ObservableObject {
             client.setApiKey(saved)
         }
 
+        // 卸载重装后 HTTPCookieStorage 已被清空，用 Keychain 里的会话恢复
+        if !client.hasSessionCookie, let saved = CookieVault.load(),
+           let host = client.baseURL.host {
+            for cookie in CookieImporter.parse(saved, host: host) {
+                HTTPCookieStorage.shared.setCookie(cookie)
+            }
+        }
+
         do {
             currentUser = try await client.currentUser()
             if currentUser != nil { cancelComputerLogin() }
@@ -318,6 +326,9 @@ final class AuthStore: ObservableObject {
                 return
             }
             currentUser = user
+            if let header = client.currentCookieHeader() {
+                CookieVault.save(header)
+            }
             cancelComputerLogin()
             cancelDeviceLogin()
             needsSecondFactor = false
@@ -379,6 +390,7 @@ final class AuthStore: ObservableObject {
         defer { isBusy = false }
 
         TokenStore.clear()
+        CookieVault.clear()
         client.setApiKey(nil)
         try? await client.logout()
         currentUser = nil

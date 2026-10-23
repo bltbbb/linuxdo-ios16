@@ -85,32 +85,26 @@ final class DirectTransport {
     }
 
     private func waitUntilReady(_ connection: NWConnection, timeout: TimeInterval) async throws {
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                    let box = ResumeOnce(cont)
-                    connection.stateUpdateHandler = { state in
-                        switch state {
-                        case .ready:
-                            box.resume()
-                        case .failed(let error):
-                            box.resume(throwing: TransportError.connect(error.localizedDescription))
-                        case .cancelled:
-                            box.resume(throwing: TransportError.connect("连接被取消"))
-                        default:
-                            break
-                        }
-                    }
-                    connection.start(queue: self.queue)
+        // 不依赖 cancel 后一定回调：超时由定时器直接 resume，避免 await 永久挂住。
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let box = ResumeOnce(cont)
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    box.resume()
+                case .failed(let error):
+                    box.resume(throwing: TransportError.connect(error.localizedDescription))
+                case .cancelled:
+                    box.resume(throwing: TransportError.connect("连接被取消"))
+                default:
+                    break
                 }
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            connection.start(queue: self.queue)
+            self.queue.asyncAfter(deadline: .now() + timeout) {
                 connection.cancel()
-                throw TransportError.timeout
+                box.resume(throwing: TransportError.timeout)
             }
-            _ = try await group.next()
-            group.cancelAll()
         }
     }
 
@@ -127,39 +121,39 @@ final class DirectTransport {
     }
 
     private func readAll(_ connection: NWConnection, timeout: TimeInterval) async throws -> Data {
-        try await withThrowingTaskGroup(of: Data.self) { group in
-            group.addTask { try await self.readLoop(connection) }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                connection.cancel()
-                throw TransportError.timeout
-            }
-            let first = try await group.next()
-            group.cancelAll()
-            guard let data = first, !data.isEmpty else { throw TransportError.timeout }
-            return data
-        }
-    }
-
-    private func readLoop(_ connection: NWConnection) async throws -> Data {
+        let deadline = Date().addingTimeInterval(timeout)
         var buffer = Data()
+
         while true {
-            let (chunk, isComplete) = try await withCheckedThrowingContinuation {
-                (cont: CheckedContinuation<(Data?, Bool), Error>) in
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) {
-                    data, _, isComplete, error in
-                    if let error = error {
-                        cont.resume(throwing: TransportError.connect(error.localizedDescription))
-                    } else {
-                        cont.resume(returning: (data, isComplete))
-                    }
-                }
-            }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+
+            let (chunk, isComplete) = try await receiveOnce(connection, timeout: remaining)
             if let chunk = chunk { buffer.append(chunk) }
             if buffer.count > 12 * 1024 * 1024 { break }
             if isComplete { break }
         }
+
+        guard !buffer.isEmpty else { throw TransportError.timeout }
         return buffer
+    }
+
+    private func receiveOnce(_ connection: NWConnection, timeout: TimeInterval) async throws -> (Data?, Bool) {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(Data?, Bool), Error>) in
+            let box = ResumeResult(cont)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) {
+                data, _, isComplete, error in
+                if let error = error {
+                    box.fail(TransportError.connect(error.localizedDescription))
+                } else {
+                    box.ok((data, isComplete))
+                }
+            }
+            self.queue.asyncAfter(deadline: .now() + timeout) {
+                connection.cancel()
+                box.fail(TransportError.timeout)
+            }
+        }
     }
 
     // MARK: - 报文编解码
@@ -298,5 +292,31 @@ private final class ResumeOnce {
         continuation = nil
         lock.unlock()
         target?.resume(throwing: error)
+    }
+}
+
+/// 保证 `(Data?, Bool)` 的 continuation 只被 resume 一次。
+private final class ResumeResult {
+    private var continuation: CheckedContinuation<(Data?, Bool), Error>?
+    private let lock = NSLock()
+
+    init(_ continuation: CheckedContinuation<(Data?, Bool), Error>) {
+        self.continuation = continuation
+    }
+
+    func ok(_ value: (Data?, Bool)) {
+        take()?.resume(returning: value)
+    }
+
+    func fail(_ error: Error) {
+        take()?.resume(throwing: error)
+    }
+
+    private func take() -> CheckedContinuation<(Data?, Bool), Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        let target = continuation
+        continuation = nil
+        return target
     }
 }

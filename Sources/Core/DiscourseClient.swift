@@ -123,6 +123,16 @@ final class DiscourseClient {
         return String(data: data.prefix(200), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
+    /// 是否已有登录会话 cookie。
+    var hasSessionCookie: Bool {
+        currentCookies().contains { $0.name == "_t" && !$0.value.isEmpty }
+    }
+
+    /// 当前 cookie 的请求头形式，用于存进 Keychain。
+    func currentCookieHeader() -> String? {
+        cookieHeader(for: baseURL)
+    }
+
     // MARK: - transport
 
     private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
