@@ -78,7 +78,7 @@ final class DirectTransport {
         let connection = NWConnection(host: NWEndpoint.Host(ip), port: nwPort, using: parameters)
         defer { connection.cancel() }
 
-        try await waitUntilReady(connection, timeout: min(timeout, 10))
+        try await waitUntilReady(connection, timeout: min(timeout, 5))
         try await sendAll(connection, data: Self.serialize(request, url: url, host: host))
         let raw = try await readAll(connection, timeout: timeout)
         return try Self.parse(raw, url: url)

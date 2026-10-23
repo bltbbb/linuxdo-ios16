@@ -1,15 +1,12 @@
 import Foundation
 
 /// 用 DoH（DNS over HTTPS）解析域名，绕开本地 DNS 污染。
-///
-/// 原版 app 用 libcurl + `CURLOPT_DOH_URL` 做同样的事。这里不引入 C 依赖，
-/// 直接按 RFC 8484 构造/解析 DNS 报文。多个端点**并发**查询，取最先成功的一个，
-/// 最坏等待时间等于单次超时（3 秒），而不是端点数量乘以超时。
+/// 同时查 A 与 AAAA，多个端点并发，取最先成功的一个。
 actor DoHResolver {
 
     static let shared = DoHResolver()
 
-    /// 只放国内直连可达的端点；cloudflare / google 在不挂代理时不可用。
+    /// 只放国内直连可达的端点。
     private static let endpoints = [
         "https://dns.alidns.com/dns-query",
         "https://doh.pub/dns-query",
@@ -39,6 +36,7 @@ actor DoHResolver {
         }
     }
 
+    /// 返回候选地址，IPv6 在前（CF 的 v6 在国内有时反而可用）。
     func resolve(_ host: String) async throws -> [String] {
         if let entry = cache[host], entry.expiresAt > Date(), !entry.ips.isEmpty {
             return entry.ips
@@ -46,42 +44,56 @@ actor DoHResolver {
 
         let outcome = await withTaskGroup(
             of: (String, Result<[String], Error>).self,
-            returning: (winner: [String], failures: [String]).self
+            returning: (v4: [String], v6: [String], failures: [String]).self
         ) { group in
             for endpoint in Self.endpoints {
-                group.addTask {
-                    do {
-                        return (endpoint, .success(try await Self.query(host: host, endpoint: endpoint)))
-                    } catch {
-                        return (endpoint, .failure(error))
+                for recordType in [UInt16(28), UInt16(1)] {   // 先 AAAA 再 A
+                    group.addTask {
+                        do {
+                            let ips = try await Self.query(host: host, type: recordType, endpoint: endpoint)
+                            return ("\(endpoint)#\(recordType)", .success(ips))
+                        } catch {
+                            return ("\(endpoint)#\(recordType)", .failure(error))
+                        }
                     }
                 }
             }
 
+            var v4: [String] = []
+            var v6: [String] = []
             var failures: [String] = []
-            var winner: [String] = []
-            while let (endpoint, result) = await group.next() {
+            var pending = Self.endpoints.count * 2
+
+            while let (label, result) = await group.next() {
+                pending -= 1
                 switch result {
-                case .success(let ips) where !ips.isEmpty:
-                    winner = ips
-                    group.cancelAll()
-                case .success:
-                    failures.append("\(endpoint): 空应答")
+                case .success(let ips):
+                    for ip in ips where !ip.isEmpty {
+                        if ip.contains(":") {
+                            if !v6.contains(ip) { v6.append(ip) }
+                        } else {
+                            if !v4.contains(ip) { v4.append(ip) }
+                        }
+                    }
                 case .failure(let error):
-                    failures.append("\(endpoint): \(error.localizedDescription)")
+                    if failures.count < 4 {
+                        failures.append("\(label): \(error.localizedDescription)")
+                    }
                 }
-                if !winner.isEmpty { break }
+                if !v4.isEmpty && !v6.isEmpty { break }
+                if pending == 0 { break }
             }
-            return (winner, failures)
+            return (v4, v6, failures)
         }
 
-        if !outcome.winner.isEmpty {
-            cache[host] = (outcome.winner, Date().addingTimeInterval(cacheTTL))
-            return outcome.winner
+        let combined = outcome.v6 + outcome.v4
+        guard !combined.isEmpty else {
+            throw ResolveError.allEndpointsFailed(
+                outcome.failures.isEmpty ? "全部端点无应答" : outcome.failures.joined(separator: " | ")
+            )
         }
-        throw ResolveError.allEndpointsFailed(
-            outcome.failures.isEmpty ? "全部端点无应答" : outcome.failures.joined(separator: " | ")
-        )
+        cache[host] = (combined, Date().addingTimeInterval(cacheTTL))
+        return combined
     }
 
     func invalidate(_ host: String) {
@@ -90,26 +102,25 @@ actor DoHResolver {
 
     // MARK: - 单次 DoH 查询（无状态，可并发）
 
-    private static func query(host: String, endpoint: String) async throws -> [String] {
+    private static func query(host: String, type: UInt16, endpoint: String) async throws -> [String] {
         guard let url = URL(string: endpoint) else { return [] }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/dns-message", forHTTPHeaderField: "Content-Type")
         request.setValue("application/dns-message", forHTTPHeaderField: "Accept")
-        request.httpBody = buildQuery(host: host)
+        request.httpBody = buildQuery(host: host, type: type)
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw ResolveError.allEndpointsFailed("HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
         }
-        return parseAnswers(data)
+        return parseAnswers(data, type: type)
     }
 
     // MARK: - DNS 报文
 
-    /// 构造一个标准 A 记录查询报文。
-    static func buildQuery(host: String) -> Data {
+    static func buildQuery(host: String, type: UInt16 = 1) -> Data {
         var data = Data()
         var identifier = UInt16.random(in: 1...UInt16.max)
         withUnsafeBytes(of: &identifier) { data.append(contentsOf: $0.reversed()) }
@@ -125,14 +136,13 @@ actor DoHResolver {
             data.append(UInt8(bytes.count))
             data.append(contentsOf: bytes)
         }
-        data.append(0)                          // 名字结束
-        data.append(contentsOf: [0x00, 0x01])   // TYPE=A
+        data.append(0)
+        data.append(contentsOf: [UInt8(type >> 8), UInt8(type & 0xff)])
         data.append(contentsOf: [0x00, 0x01])   // CLASS=IN
         return data
     }
 
-    /// 从响应报文里取所有 A 记录的 IPv4 地址。
-    static func parseAnswers(_ data: Data) -> [String] {
+    static func parseAnswers(_ data: Data, type: UInt16 = 1) -> [String] {
         let bytes = [UInt8](data)
         guard bytes.count > 12 else { return [] }
 
@@ -151,12 +161,20 @@ actor DoHResolver {
         for _ in 0..<anCount {
             guard skipName(bytes, &offset) else { break }
             guard offset + 10 <= bytes.count else { break }
-            let type = Int(bytes[offset]) << 8 | Int(bytes[offset + 1])
+            let recordType = Int(bytes[offset]) << 8 | Int(bytes[offset + 1])
             let rdLength = Int(bytes[offset + 8]) << 8 | Int(bytes[offset + 9])
             offset += 10
             guard offset + rdLength <= bytes.count else { break }
-            if type == 1, rdLength == 4 {
+
+            if recordType == 1, rdLength == 4 {
                 let ip = "\(bytes[offset]).\(bytes[offset + 1]).\(bytes[offset + 2]).\(bytes[offset + 3])"
+                if !result.contains(ip) { result.append(ip) }
+            } else if recordType == 28, rdLength == 16 {
+                var groups: [String] = []
+                for index in stride(from: 0, to: 16, by: 2) {
+                    groups.append(String(format: "%x", Int(bytes[offset + index]) << 8 | Int(bytes[offset + index + 1])))
+                }
+                let ip = groups.joined(separator: ":")
                 if !result.contains(ip) { result.append(ip) }
             }
             offset += rdLength
@@ -164,7 +182,6 @@ actor DoHResolver {
         return result
     }
 
-    /// 跳过域名（可能是标签序列，也可能是压缩指针）。
     private static func skipName(_ bytes: [UInt8], _ offset: inout Int) -> Bool {
         while offset < bytes.count {
             let length = Int(bytes[offset])
@@ -172,7 +189,7 @@ actor DoHResolver {
                 offset += 1
                 return true
             }
-            if length & 0xC0 == 0xC0 {   // 压缩指针，两字节
+            if length & 0xC0 == 0xC0 {
                 offset += 2
                 return true
             }
