@@ -8,6 +8,8 @@ actor DoHResolver {
 
     /// 只放国内直连可达的端点。
     private static let endpoints = [
+        // 原 app 自建的 DoH 中转，实测返回的是真实的 Cloudflare 边缘地址。
+        "https://ios-app.ddd.oaifree.com/query-dns",
         "https://dns.alidns.com/dns-query",
         "https://doh.pub/dns-query",
         "https://223.5.5.5/dns-query",
@@ -38,62 +40,79 @@ actor DoHResolver {
 
     /// 返回候选地址，IPv6 在前（CF 的 v6 在国内有时反而可用）。
     func resolve(_ host: String) async throws -> [String] {
+        let outcome = await resolveReport(host)
+        guard !outcome.ips.isEmpty else {
+            throw ResolveError.allEndpointsFailed(
+                outcome.report.isEmpty ? "全部端点无应答" : outcome.report.joined(separator: " | ")
+            )
+        }
+        return outcome.ips
+    }
+
+    /// 收集**所有**端点的答案，并附带每个端点的结果。
+    ///
+    /// 不能「谁先答就用谁」：本地链路会伪造 DNS 应答（典型投毒落在
+    /// Facebook 的 2a03:2880::/32 或 182.50.x.x），抢先返回的往往正是假地址，
+    /// 一旦选中，后面所有握手都在攻击者给的 IP 上空转到超时。
+    /// 这里把所有答案一起交给传输层，能完成握手并核对证书的那个才算数。
+    func resolveReport(_ host: String) async -> (ips: [String], report: [String]) {
         if let entry = cache[host], entry.expiresAt > Date(), !entry.ips.isEmpty {
-            return entry.ips
+            return (entry.ips, ["命中缓存"])
         }
 
-        let outcome = await withTaskGroup(
-            of: (String, Result<[String], Error>).self,
-            returning: (v4: [String], v6: [String], failures: [String]).self
-        ) { group in
+        var v4: [String] = []
+        var v6: [String] = []
+        var report: [String] = []
+
+        await withTaskGroup(of: (String, Result<[String], Error>).self) { group in
             for endpoint in Self.endpoints {
-                for recordType in [UInt16(28), UInt16(1)] {   // 先 AAAA 再 A
+                for recordType in [UInt16(1), UInt16(28)] {
+                    let label = "\(Self.shortName(endpoint))#\(recordType == 1 ? "A" : "AAAA")"
                     group.addTask {
                         do {
                             let ips = try await Self.query(host: host, type: recordType, endpoint: endpoint)
-                            return ("\(endpoint)#\(recordType)", .success(ips))
+                            return (label, .success(ips))
                         } catch {
-                            return ("\(endpoint)#\(recordType)", .failure(error))
+                            return (label, .failure(error))
                         }
                     }
                 }
             }
-
-            var v4: [String] = []
-            var v6: [String] = []
-            var failures: [String] = []
-            var pending = Self.endpoints.count * 2
 
             while let (label, result) = await group.next() {
-                pending -= 1
                 switch result {
                 case .success(let ips):
-                    for ip in ips where !ip.isEmpty {
+                    if ips.isEmpty {
+                        report.append("\(label)空")
+                        continue
+                    }
+                    var fresh: [String] = []
+                    for ip in ips {
                         if ip.contains(":") {
-                            if !v6.contains(ip) { v6.append(ip) }
+                            if !v6.contains(ip) { v6.append(ip); fresh.append(ip) }
                         } else {
-                            if !v4.contains(ip) { v4.append(ip) }
+                            if !v4.contains(ip) { v4.append(ip); fresh.append(ip) }
                         }
                     }
-                case .failure(let error):
-                    if failures.count < 4 {
-                        failures.append("\(label): \(error.localizedDescription)")
+                    if !fresh.isEmpty {
+                        report.append("\(label)→\(fresh.joined(separator: ","))")
                     }
+                case .failure:
+                    report.append("\(label)✗")
                 }
-                if !v4.isEmpty && !v6.isEmpty { break }
-                if pending == 0 { break }
             }
-            return (v4, v6, failures)
         }
 
-        let combined = outcome.v6 + outcome.v4
-        guard !combined.isEmpty else {
-            throw ResolveError.allEndpointsFailed(
-                outcome.failures.isEmpty ? "全部端点无应答" : outcome.failures.joined(separator: " | ")
-            )
+        let combined = Array((v6 + v4).prefix(12))
+        if !combined.isEmpty {
+            cache[host] = (combined, Date().addingTimeInterval(cacheTTL))
         }
-        cache[host] = (combined, Date().addingTimeInterval(cacheTTL))
-        return combined
+        return (combined, report)
+    }
+
+    private static func shortName(_ endpoint: String) -> String {
+        guard let name = URL(string: endpoint)?.host else { return endpoint }
+        return name.hasPrefix("ios-app.") ? "oaifree" : name
     }
 
     func invalidate(_ host: String) {

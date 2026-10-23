@@ -183,13 +183,15 @@ final class DirectTransport {
 
         var seeds = NetworkSettings.customIPs
         if seeds.isEmpty {
-            do {
-                seeds = try await DoHResolver.shared.resolve(host)
-                lines.append("DoH 解析到 \(seeds.count) 个：\(seeds.prefix(4).joined(separator: ", "))")
-            } catch {
-                lines.append("DoH 解析失败：\(error.localizedDescription)")
+            let outcome = await DoHResolver.shared.resolveReport(host)
+            seeds = outcome.ips
+            guard !seeds.isEmpty else {
+                lines.append("DoH 没有任何端点返回地址")
+                lines.append("各端点：" + outcome.report.joined(separator: "  "))
                 return lines.joined(separator: "\n")
             }
+            lines.append("DoH 解析到 \(seeds.count) 个：\(seeds.prefix(6).joined(separator: ", "))")
+            lines.append("各端点：" + outcome.report.joined(separator: "  "))
         } else {
             lines.append("使用手填地址 \(seeds.count) 个：\(seeds.prefix(4).joined(separator: ", "))")
         }
