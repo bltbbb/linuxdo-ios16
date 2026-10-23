@@ -130,7 +130,9 @@ final class DiscourseClient {
 
     /// 当前 cookie 的请求头形式，用于存进 Keychain。
     func currentCookieHeader() -> String? {
-        cookieHeader(for: baseURL)
+        let cookies = currentCookies()
+        guard !cookies.isEmpty else { return nil }
+        return HTTPCookie.requestHeaderFields(with: cookies)["Cookie"]
     }
 
     // MARK: - transport
@@ -139,6 +141,7 @@ final class DiscourseClient {
         let cookieNames = HTTPCookieStorage.shared.cookies(for: req.url ?? baseURL)?.map { $0.name } ?? []
 
         // 优先走 DoH + IP 直连（绕 DNS 污染）；失败就回退系统 DNS 的 URLSession。
+        var directFailure: String?
         if directBox.isAvailable {
             do {
                 let direct = try await DirectTransport.shared.send(req)
@@ -161,6 +164,7 @@ final class DiscourseClient {
                 throw error
             } catch {
                 directBox.markFailed()
+                directFailure = error.localizedDescription
                 await RequestLog.shared.record(
                     method: req.httpMethod ?? "?",
                     url: (req.url?.path ?? "?") + " [直连失败]",
@@ -180,7 +184,8 @@ final class DiscourseClient {
                 status: -1,
                 note: error.localizedDescription
             )
-            throw DiscourseError.transport(error.localizedDescription)
+            let detail = directFailure.map { "｜直连诊断：\($0)" } ?? ""
+            throw DiscourseError.transport(error.localizedDescription + detail)
         }
         let data = result.0
         guard let http = result.1 as? HTTPURLResponse else {
