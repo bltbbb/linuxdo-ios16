@@ -83,6 +83,56 @@ struct LoginView: View {
                     Text("电脑浏览器登录 linux.do → 按 F12 → Application → Cookies → https://linux.do → 复制 _t 的值贴到这里。这是站点唯一承认的认证方式，且全部走原生请求，手机不打开任何网页。")
                 }
 
+                Section {
+                    if let code = auth.deviceCode {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("在任意浏览器打开下面的地址，输入这组代码并授权：")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+
+                            Text(code.userCode)
+                                .font(.system(size: 30, weight: .bold, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .textSelection(.enabled)
+
+                            Text(code.verificationUri)
+                                .font(.caption2)
+                                .textSelection(.enabled)
+
+                            Button {
+                                UIPasteboard.general.string = code.verificationUri
+                            } label: {
+                                Label("复制授权地址", systemImage: "doc.on.doc")
+                            }
+
+                            HStack {
+                                if auth.isPolling {
+                                    ProgressView()
+                                    Text("等待授权…")
+                                        .font(.footnote)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button("取消") { auth.cancelDeviceLogin() }
+                                    .font(.footnote)
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    } else {
+                        Button {
+                            focused = nil
+                            Task { await auth.beginDeviceLogin() }
+                        } label: {
+                            Label("设备码登录（原版同款）", systemImage: "key.horizontal")
+                        }
+                        .disabled(auth.isBusy)
+                    }
+                } header: {
+                    Text("设备码登录")
+                } footer: {
+                    Text("与原版 app 相同的 OAuth 设备授权：手机只做轮询，不加载任何网页。若返回 403，说明站点不允许未注册的客户端。")
+                }
+
                 if auth.needsSecondFactor {
                     Section("两步验证") {
                         TextField("6 位动态验证码", text: $code)
