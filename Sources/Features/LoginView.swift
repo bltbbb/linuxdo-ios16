@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 struct LoginView: View {
 
@@ -45,6 +44,7 @@ struct LoginView: View {
                 } footer: {
                     Text("设备码登录需要站点开启 user api key device authorization；网页登录需要 WebKit 能渲染登录页；账号密码登录需要站点未启用交互式校验。")
                 }
+                .disabled(auth.isBusy || auth.isWaitingForBrowser)
             }
             .navigationTitle("LINUX DO")
             .sheet(isPresented: $showsWebLogin) {
@@ -59,19 +59,11 @@ struct LoginView: View {
     @ViewBuilder
     private var apiKeySection: some View {
         Section {
-            if let url = auth.authorizeURL {
+            if auth.isWaitingForBrowser {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("下一步：在浏览器里登录并点「授权」，完成后会自动回到 app。")
+                    Text("请在系统授权页面登录并点「授权」，完成后会自动返回。")
                         .font(.footnote)
                         .foregroundColor(.secondary)
-
-                    Button {
-                        UIApplication.shared.open(url)
-                    } label: {
-                        Label("在浏览器中打开授权页", systemImage: "safari")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
 
                     HStack {
                         if auth.isWaitingForBrowser {
@@ -84,14 +76,6 @@ struct LoginView: View {
                         Button("取消") { auth.cancelUserApiKeyLogin() }
                             .font(.footnote)
                     }
-
-                    DisclosureGroup("授权页地址") {
-                        Text(url.absoluteString)
-                            .font(.caption2)
-                            .monospaced()
-                            .textSelection(.enabled)
-                    }
-                    .font(.footnote)
                 }
                 .padding(.vertical, 6)
             } else {
@@ -113,8 +97,8 @@ struct LoginView: View {
         } header: {
             Text("登录 linux.do")
         } footer: {
-            if auth.authorizeURL == nil {
-                Text("与原版 app 相同的 User API Key 流程：生成密钥对 → 浏览器授权 → 拿到 API Key 直连接口。不使用 WebKit、不依赖 cookie。")
+            if !auth.isWaitingForBrowser {
+                Text("在系统授权页面登录网站并确认只读授权，完成后使用用户密钥读取论坛。站点需允许第三方应用授权。")
             }
         }
     }

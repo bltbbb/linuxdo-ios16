@@ -4,12 +4,49 @@
 
 目标：在 **iOS 16.3** 上获得 LINUX DO 的原生使用体验。
 
-前提结论（已用静态分析证实）：`org.linuxdo.community-1.0.2` 这个包**无法**降版本运行。
-它强加载 SwiftData / TipKit / Symbols / libswiftObservation（均为 iOS 17+），
-持久化 100% 建立在 SwiftData 上（`NSManagedObject = 0`、`sqlite = 0`），
-且 Swift 静态分发让这些调用点无法用 stub 替换。
-但它的后端是**标准 Discourse REST API**（`https://linux.do`），没有任何私有协议，
-因此可以另写一个客户端 —— 就是这个工程。
+静态分析表明，原版 `org.linuxdo.community-1.0.2` 强依赖 SwiftData、Observation 等新系统接口，
+无法仅靠修改最低版本号支持 iOS 16.3。本工程使用 iOS 16 可用接口重新实现客户端。
+论坛基于 Discourse，但站点可能扩展认证协议，不能将上游文档视为全部站点行为。
+
+## 浏览器授权登录修复
+
+原实现将授权入口写成 `POST /user-api-key/new`，随后尝试从 HTML 提取 payload，
+再跳转到 `/user-api-key/authorize`。这与标准 Discourse 的经典 User API Key 流程不符：
+
+1. 客户端生成 RSA 密钥对、随机 nonce 和每个安装实例独立的 client ID。
+2. 系统认证浏览器 `ASWebAuthenticationSession` 打开 `GET /user-api-key/new`，查询参数携带公钥、nonce、权限和回调地址。
+3. 用户在网站登录并确认授权，由网页向 `POST /user-api-key` 提交。
+4. 系统认证会话接收 `discourse://auth_redirect?payload=...`，客户端解密 payload 并校验其中的 nonce。
+5. 使用返回的用户密钥查询 `/session/current.json`，成功后保存密钥并进入列表。
+
+当前主流程申请 `read,session_info`，不申请依赖推送地址的 `notifications`。
+公钥中的 `+` 编码为 `%2B`，避免服务器按表单规则将其解释成空格。
+认证会话直接接收回调，不使用 `UIApplication.open` 加自定义 URL 注册来争抢回调。
+私钥和待验证 nonce 只在内存保留，授权中途应用进程被系统终止后需要重新发起。
+
+日志含义：
+
+- `/session/current.json` 的匿名 404 是未登录状态，不表示该接口不存在。
+- `/session/csrf.json` 返回 200 只表示取到了防跨站请求令牌，不表示登录成功。
+- 浏览器授权入口不需要先从原生网络会话取 CSRF，也不会再由客户端 POST 到 `/user-api-key/new`。
+- 认证端点正文不写入诊断日志；授权结果解码错误也不输出解密后的内容。
+
+站点仍需允许用户 API Key、所申请权限和回调地址。`discourse://auth_redirect` 是 Discourse 默认允许的地址，
+并不代表已经验证 linux.do 当前部署的允许列表。若网页提示回调不允许或用户无权授权，需要查看具体站点提示。
+系统认证浏览器与原生 URLSession 不共享全部浏览器状态；获得用户密钥也不保证绕过站点的 Cloudflare 校验。
+
+回归用例位于 `Tests/UserApiKeyFlowTests.swift`，覆盖公钥查询参数编码、正确回调、nonce 不匹配或缺失、
+错误回调地址、重复 payload 和错误私钥。此次仅进行了静态检查，按要求未执行本地构建、测试或真机登录。
+原版 IPA 中存在 `/login/device/code` 和 `/login/oauth/access_token` 字符串，
+但备用设备码实现的请求字段及响应结构尚未核实，本次没有将其当作已经可用的登录方案。
+
+真机验收顺序：打开“浏览器授权登录” → 网站登录和确认授权 → 自动返回应用 → 当前用户查询成功 → 进入主题列表。
+还需检查取消后重新授权、重启恢复，以及权限被撤销后的行为。
+
+依据：[Discourse 授权规范](https://meta.discourse.org/t/user-api-keys-specification/48536)、
+[上游路由](https://github.com/discourse/discourse/blob/main/config/routes.rb)、
+[匿名会话处理](https://github.com/discourse/discourse/blob/main/app/controllers/session_controller.rb)、
+[苹果系统认证会话](https://developer.apple.com/documentation/authenticationservices/aswebauthenticationsession)。
 
 ---
 
@@ -25,7 +62,7 @@
 | `sensoryFeedback` | 无（可后续用 `UIImpactFeedbackGenerator`） |
 | TipKit | 无 |
 | Symbols framework | 无 |
-| User API Key + Device 授权流 | 网页登录（WKWebView 过 Cloudflare）→ cookie 复用 |
+| User API Key + Device 授权流 | 系统浏览器 User API Key 授权；另保留网页登录备用入口 |
 | MessageBus 实时推送 | **未实现**（见「未实现」） |
 
 三个 SwiftData 实体逐字段还原为 Core Data 实体：
@@ -59,7 +96,7 @@ LinuxDoClient/
         └── RichTextWebView.swift     渲染 Discourse `cooked` HTML
 ```
 
-零第三方依赖。仅用 Foundation / SwiftUI / WebKit / CoreData。
+零第三方依赖。使用 Foundation / SwiftUI / UIKit / WebKit / CoreData / Security / AuthenticationServices。
 
 ---
 
@@ -103,6 +140,7 @@ open LinuxDoClient.xcodeproj
 
 ## 已实现
 
+- 系统浏览器 User API Key 授权链路（此次修正，待真机验证）
 - Cookie 会话登录（含 TOTP 二次验证分支）
 - 冷启动会话恢复（`/session/current.json`）
 - 列表：最新 / 热门 / 未读，分页加载，下拉刷新
@@ -126,14 +164,11 @@ open LinuxDoClient.xcodeproj
 
 - **未在真机编译验证**：本工程是在 Windows 上按 iOS 16 可用 API 静态书写，
   没有 Xcode 参与。首次 `xcodegen generate` + 编译时可能需要修少量编译错误。
-- **Cloudflare 校验（已实测确认）**：从数据中心网络请求 `https://linux.do/latest.json`
-  返回 `403` + `Cf-Mitigated: challenge`。站点启用了交互式 JS 挑战，纯 `URLSession`
-  请求无法通过。因此登录必须走 `WebLoginView`（WKWebView 完成校验，再把 cookie
-  灌进 `HTTPCookieStorage` 供原生请求复用）。手机蜂窝网络下是否同样触发挑战，
-  取决于站点策略，需真机确认。
+- **Cloudflare 校验**：交互式挑战可能阻止原生 `URLSession` 请求，用户 API Key 不保证免除挑战。
+  网页登录的 Cookie 同步也不保证通过跨客户端校验，具体需要设备和网络环境验证。
 - **直接登录的可用性**：`/session` + CSRF 表单登录仅在未触发挑战时可用。
-  若站点强制 passkey / 社交登录，需要实现 Discourse User API Key
-  （device_code 授权，原 app 用的正是这条）。
+  若站点强制 passkey / 社交登录，应在网站授权页面完成对应交互；
+  经典 User API Key 回调和设备码授权是不同协议，不能混用端点及响应结构。
 - **`@MainActor` 与 `@StateObject` 默认值**：Swift 6 严格并发模式下会报
   main-actor 隔离错误。本工程已在 `project.yml` 里设 `SWIFT_VERSION = 5.0`、
   `SWIFT_STRICT_CONCURRENCY = minimal` 规避。

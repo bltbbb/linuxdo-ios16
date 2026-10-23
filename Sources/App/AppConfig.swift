@@ -3,7 +3,7 @@ import Foundation
 /// 全局配置。刻意不读取任何 iOS 17+ 接口。
 enum AppConfig {
 
-    /// 后端就是标准 Discourse，与原 app 1.0.2 完全一致。
+    /// 论坛基于 Discourse；站点可能扩展认证接口，不假定与上游完全一致。
     static let baseURL = URL(string: "https://linux.do")!
 
     static let clientName = "LinuxDoClient"

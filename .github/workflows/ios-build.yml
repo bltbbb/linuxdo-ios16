@@ -69,6 +69,27 @@ jobs:
           echo "--- linked frameworks that iOS 16 does NOT have (should be empty) ---"
           otool -L "$APP/LinuxDoClient" | grep -Ei 'SwiftData|TipKit|Symbols\.framework|swiftObservation' || echo "(none — good)"
 
+      - name: Run unit tests on simulator
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project LinuxDoClient.xcodeproj \
+            -scheme LinuxDoClient \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -derivedDataPath build-tests \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee test.log
+
+      - name: Extract test results
+        if: always()
+        run: |
+          echo "=== failing tests ==="
+          grep -E "error:|✘|failed" test.log | head -40 || echo "(none)"
+          echo "=== summary ==="
+          grep -E "Test Suite .* (passed|failed)|Executed [0-9]+ test" test.log | tail -10 || true
+
       - name: Extract errors
         if: always()
         run: |

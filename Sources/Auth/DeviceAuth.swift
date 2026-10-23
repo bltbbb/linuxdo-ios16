@@ -1,7 +1,8 @@
 import Foundation
 import Security
 
-/// OAuth 2.0 Device Authorization Grant —— 原 app 1.0.2 用的就是这套。
+/// 站点定制设备码登录的候选实现。
+/// 原版 IPA 含有下列端点字符串，但响应格式和令牌语义尚未核实，不能等同于标准 Discourse 协议。
 ///
 /// 流程：
 /// 1. `POST /login/device/code` 拿 device_code + user_code + verification_uri
@@ -17,9 +18,6 @@ enum DeviceAuthConfig {
     static let scopes = ["read", "write", "notifications", "session_info"]
     static let applicationName = "LinuxDoClient"
 
-    /// User API Key 授权完成后，服务端 302 到这个自定义 scheme。
-    /// 必须与 Info.plist 的 CFBundleURLSchemes 一致。
-    static let authRedirect = "linuxdoclient://auth"
 }
 
 struct DeviceCodeResponse: Decodable {

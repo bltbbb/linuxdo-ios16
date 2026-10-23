@@ -43,11 +43,17 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
           NSAllowsArbitraryLoadsInWebContent: true
-        # User API Key 授权完成后由站点 302 回这个 scheme
-        CFBundleURLTypes:
-          - CFBundleURLName: com.example.linuxdoclient
-            CFBundleURLSchemes:
-              - linuxdoclient
+
+  LinuxDoClientTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: LinuxDoClient
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
 
 schemes:
   LinuxDoClient:
@@ -58,3 +64,6 @@ schemes:
       config: Debug
     archive:
       config: Release
+    test:
+      targets:
+        - LinuxDoClientTests

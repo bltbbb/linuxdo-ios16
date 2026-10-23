@@ -115,7 +115,12 @@ final class DiscourseClient {
             method: req.httpMethod ?? "?",
             url: req.url?.path ?? "?",
             status: http.statusCode,
-            note: Self.message(from: data)
+            note: req.url?.path == "/session"
+                || req.url?.path.hasPrefix("/session/") == true
+                || req.url?.path.hasPrefix("/user-api-key") == true
+                || req.url?.path.hasPrefix("/login/") == true
+                ? "认证响应正文已省略"
+                : Self.message(from: data)
         )
         if http.statusCode == 403, Self.message(from: data).isEmpty {
             throw DiscourseError.cloudflare
@@ -223,8 +228,14 @@ final class DiscourseClient {
         req.httpMethod = "GET"
         decorate(&req)
         let (data, http) = try await send(req)
-        guard http.statusCode == 200 else { return nil }
-        return (try? decoder.decode(SessionCurrentResponse.self, from: data))?.currentUser
+        // Discourse 在没有当前用户时返回 404；其他失败应保留真实错误。
+        if http.statusCode == 404 || http.statusCode == 401 { return nil }
+        try ensureOK(data, http)
+        do {
+            return try decoder.decode(SessionCurrentResponse.self, from: data).currentUser
+        } catch {
+            throw DiscourseError.decoding("当前用户响应格式不正确")
+        }
     }
 
     struct LoginOutcome {
@@ -266,7 +277,7 @@ final class DiscourseClient {
         }
     }
 
-    // MARK: - Device Authorization Grant（与原 app 相同的登录方式）
+    // MARK: - 站点定制设备码登录（协议尚待验证）
 
     /// 第一步：申请设备码。用户拿 user_code 去浏览器授权。
     ///
@@ -352,60 +363,23 @@ final class DiscourseClient {
 
     // MARK: - User API Key（RSA，Discourse 经典方案）
 
-    /// 第一步：`POST /user-api-key/new`，从返回的页面里取出 `payload`，
-    /// 拼成需要用户在浏览器打开的授权地址。
+    /// 只构造浏览器 GET 授权地址，不请求 CSRF，也不提前创建密钥。
     func requestUserApiKey(
         publicKeyPEM: String,
         nonce: String,
         clientId: String,
         scopes: [String],
         redirect: String
-    ) async throws -> URL {
-        let fields: [String: String] = [
-            "application_name": DeviceAuthConfig.applicationName,
-            "client_id": clientId,
-            "scopes": scopes.joined(separator: ","),
-            "public_key": publicKeyPEM,
-            "nonce": nonce,
-            "auth_redirect": redirect
-        ]
-
-        // 这个 action 只渲染 HTML。必须用浏览器式 Accept，
-        // 否则 Rails 格式协商找不到 JSON 模板，直接返回 404「找不到请求的 URL 或资源」。
-        let htmlAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        var (data, http) = try await postFormRaw(
-            "/user-api-key/new", fields: fields, withCSRF: true, accept: htmlAccept
+    ) throws -> URL {
+        try UserApiKeyAuthorization.makeURL(
+            baseURL: baseURL,
+            applicationName: AppConfig.clientName,
+            publicKeyPEM: publicKeyPEM,
+            nonce: nonce,
+            clientId: clientId,
+            scopes: scopes,
+            redirect: redirect
         )
-        if http.statusCode == 403 {
-            // 有些站点该 action 豁免 CSRF，去掉 token 再试一次
-            (data, http) = try await postFormRaw(
-                "/user-api-key/new", fields: fields, withCSRF: false, accept: htmlAccept
-            )
-        }
-        if http.statusCode == 404 || http.statusCode == 406 {
-            (data, http) = try await postFormRaw(
-                "/user-api-key/new", fields: fields, withCSRF: true, accept: "application/json"
-            )
-        }
-        guard http.statusCode < 400 else {
-            throw DiscourseError.http(
-                http.statusCode,
-                Self.message(from: data) + "（POST /user-api-key/new）"
-            )
-        }
-
-        let html = String(data: data, encoding: .utf8) ?? ""
-        guard let payload = PayloadExtractor.extract(from: html) else {
-            throw DiscourseError.decoding("响应里找不到 payload：" + Self.snippet(data))
-        }
-
-        guard var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
-            throw DiscourseError.badURL
-        }
-        comps.path = "/user-api-key/authorize"
-        comps.queryItems = [URLQueryItem(name: "payload", value: payload)]
-        guard let url = comps.url else { throw DiscourseError.badURL }
-        return url
     }
 
     // MARK: - feeds
