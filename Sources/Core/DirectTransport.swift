@@ -156,7 +156,7 @@ final class DirectTransport {
         let sec = tlsOptions.securityProtocolOptions
 
         let sni = host.hasSuffix(".") ? host : host + "."
-        sec_protocol_options_set_tls_server_name(sec, sni as CFString)
+        sni.withCString { sec_protocol_options_set_tls_server_name(sec, $0) }
         sec_protocol_options_set_min_tls_protocol_version(sec, .TLSv12)
         sec_protocol_options_set_peer_authentication_required(sec, true)
 
