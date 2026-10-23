@@ -224,7 +224,7 @@ final class DiscourseClient {
     }
 
     func logout() async throws {
-        _ = try? await postForm("/logout", fields: [])
+        _ = try? await postForm("/logout", fields: [:])
         await csrfCache.set(nil)
         if let cookies = HTTPCookieStorage.shared.cookies {
             cookies.forEach { HTTPCookieStorage.shared.deleteCookie($0) }
