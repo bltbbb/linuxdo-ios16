@@ -58,8 +58,12 @@ struct LoginView: View {
                 if let message = auth.errorMessage {
                     Section {
                         Text(message)
-                            .font(.footnote)
+                            .font(.caption2)
+                            .monospaced()
                             .foregroundColor(.red)
+                            .textSelection(.enabled)
+                    } header: {
+                        Text("错误详情（可长按复制）")
                     }
                 }
 

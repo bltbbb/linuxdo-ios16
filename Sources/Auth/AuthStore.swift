@@ -59,11 +59,28 @@ final class AuthStore: ObservableObject {
                 errorMessage = nil
             } else {
                 needsSecondFactor = outcome.secondFactorRequired
-                errorMessage = outcome.message ?? "登录失败"
+                var message = outcome.message ?? "登录失败"
+                if let diagnostics = await diagnosticsSuffix() {
+                    message += "\n\n" + diagnostics
+                }
+                errorMessage = message
             }
         } catch {
-            errorMessage = error.localizedDescription
+            var message = error.localizedDescription
+            if let diagnostics = await diagnosticsSuffix() {
+                message += "\n\n" + diagnostics
+            }
+            errorMessage = message
         }
+    }
+
+    /// 失败时附上最近几条请求，便于定位是 CSRF、cookie 还是 Cloudflare。
+    private func diagnosticsSuffix() async -> String? {
+        let entries = await RequestLog.shared.snapshot()
+        guard !entries.isEmpty else { return nil }
+        return entries.suffix(4).map {
+            "\($0.method) \($0.url) → \($0.status)\n\($0.note)"
+        }.joined(separator: "\n\n")
     }
 
     func signOut() async {

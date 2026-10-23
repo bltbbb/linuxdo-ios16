@@ -90,12 +90,24 @@ final class DiscourseClient {
         do {
             result = try await session.data(for: req)
         } catch {
+            await RequestLog.shared.record(
+                method: req.httpMethod ?? "?",
+                url: req.url?.path ?? "?",
+                status: -1,
+                note: error.localizedDescription
+            )
             throw DiscourseError.transport(error.localizedDescription)
         }
         let data = result.0
         guard let http = result.1 as? HTTPURLResponse else {
             throw DiscourseError.transport("无 HTTP 响应")
         }
+        await RequestLog.shared.record(
+            method: req.httpMethod ?? "?",
+            url: req.url?.path ?? "?",
+            status: http.statusCode,
+            note: Self.message(from: data)
+        )
         if http.statusCode == 403, Self.message(from: data).isEmpty {
             throw DiscourseError.cloudflare
         }
@@ -177,8 +189,22 @@ final class DiscourseClient {
 
     // MARK: - session
 
-    /// 先取 CSRF，同时让服务端下发匿名 `_forum_session` cookie。
+    /// 先打一次首页，让 `_forum_session` / `cf_clearance` cookie 落地，再取 CSRF。
+    ///
+    /// 顺序很重要：如果只取 CSRF 就直接 POST，token 绑定的 session 与随后
+    /// POST 携带的 cookie 可能不是同一个，Rails 会判 `InvalidAuthenticityToken`，
+    /// Discourse 把这种情况渲染成 403「您没有权限查看请求的资源。」
     func warmUp() async throws {
+        if let url = makeURL("/") {
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.setValue(AppConfig.userAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue(
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                forHTTPHeaderField: "Accept"
+            )
+            _ = try? await send(req)
+        }
         _ = try await csrfToken(forceRefresh: true)
     }
 
