@@ -1,0 +1,74 @@
+name: iOS Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: xcodebuild (deployment target iOS 16.0, no signing)
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          swift --version
+          echo "--- iPhoneOS SDK ---"
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Show project (debug aid)
+        run: |
+          xcodebuild -list -project LinuxDoClient.xcodeproj
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project LinuxDoClient.xcodeproj \
+            -scheme LinuxDoClient \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ENABLE_USER_SCRIPT_SANDBOXING=NO \
+            build 2>&1 | tee build.log
+
+      - name: Extract errors
+        if: always()
+        run: |
+          echo "=== error: lines ==="
+          grep -n "error:" build.log || echo "(none)"
+          echo "=== warning summary ==="
+          grep -c "warning:" build.log || true
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: warn
