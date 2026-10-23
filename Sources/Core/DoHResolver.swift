@@ -38,7 +38,7 @@ actor DoHResolver {
         }
     }
 
-    /// 返回候选地址，IPv6 在前（CF 的 v6 在国内有时反而可用）。
+    /// 返回候选地址，IPv4 在前。
     func resolve(_ host: String) async throws -> [String] {
         let outcome = await resolveReport(host)
         guard !outcome.ips.isEmpty else {
@@ -55,8 +55,8 @@ actor DoHResolver {
     /// Facebook 的 2a03:2880::/32 或 182.50.x.x），抢先返回的往往正是假地址，
     /// 一旦选中，后面所有握手都在攻击者给的 IP 上空转到超时。
     /// 这里把所有答案一起交给传输层，能完成握手并核对证书的那个才算数。
-    func resolveReport(_ host: String) async -> (ips: [String], report: [String]) {
-        if let entry = cache[host], entry.expiresAt > Date(), !entry.ips.isEmpty {
+    func resolveReport(_ host: String, bypassCache: Bool = false) async -> (ips: [String], report: [String]) {
+        if !bypassCache, let entry = cache[host], entry.expiresAt > Date(), !entry.ips.isEmpty {
             return (entry.ips, ["命中缓存"])
         }
 
@@ -103,7 +103,7 @@ actor DoHResolver {
             }
         }
 
-        let combined = Array((v6 + v4).prefix(12))
+        let combined = Array((v4 + v6).prefix(12))
         if !combined.isEmpty {
             cache[host] = (combined, Date().addingTimeInterval(cacheTTL))
         }

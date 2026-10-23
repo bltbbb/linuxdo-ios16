@@ -37,10 +37,15 @@ final class DirectTransport {
         }
         let port = url.port ?? 443
 
-        // 候选顺序：用户手动指定 > DoH 解析结果 + 同段邻居扩展
+        // 候选顺序：用户手动指定 > DoH 解析结果 > 内置的真实 CF 边缘地址
         var seeds = NetworkSettings.customIPs
         if seeds.isEmpty {
-            seeds = try await DoHResolver.shared.resolve(host)
+            seeds = (try? await DoHResolver.shared.resolve(host)) ?? []
+        }
+        // 解析结果可能整段被投毒。这几个是实打实的 Cloudflare 边缘地址，
+        // 证书 SAN 就是 linux.do，始终放进池子兜底。
+        for ip in Self.bootstrapIPs where !seeds.contains(ip) {
+            seeds.append(ip)
         }
         let candidates = Self.expandNeighbours(seeds)
         guard !candidates.isEmpty else {
@@ -97,15 +102,26 @@ final class DirectTransport {
         throw lastError ?? TransportError.connect("所有候选地址均不可达（\(candidates.count) 个）")
     }
 
+    /// 内置的真实 Cloudflare 边缘地址。
+    ///
+    /// 本地链路会把 linux.do 解析成 Facebook 的 IPv6 段或运营商的 IP，
+    /// 这些地址没有路由，握手会一直停在 `.waiting` 直到超时。
+    /// 下面几个都能拿到 `linux.do` 的证书，始终放进候选池兜底。
+    static let bootstrapIPs = ["104.20.16.234", "172.66.166.61"]
+
     /// 把解析结果扩展成同 /24 段的邻居候选。
     /// Cloudflare 同一段内的边缘节点通常都服务同一个站点，单点被封时邻居常可用。
+    ///
+    /// IPv4 排在 IPv6 前面：国内移动网络经常没有可用的 IPv6 路由，
+    /// 连 IPv6 只会在 `.waiting` 上空耗整个超时预算。
     static func expandNeighbours(_ seeds: [String]) -> [String] {
         var result: [String] = []
-        for seed in seeds where !result.contains(seed) {
+        let ordered = seeds.filter { !$0.contains(":") } + seeds.filter { $0.contains(":") }
+        for seed in ordered where !result.contains(seed) {
             result.append(seed)
         }
 
-        for seed in seeds.prefix(3) where !seed.contains(":") {
+        for seed in ordered.prefix(4) where !seed.contains(":") {
             let parts = seed.split(separator: ".")
             guard parts.count == 4, let last = Int(parts[3]) else { continue }
             let prefix = parts.prefix(3).joined(separator: ".")
@@ -183,31 +199,47 @@ final class DirectTransport {
 
         var seeds = NetworkSettings.customIPs
         if seeds.isEmpty {
-            let outcome = await DoHResolver.shared.resolveReport(host)
+            let outcome = await DoHResolver.shared.resolveReport(host, bypassCache: true)
             seeds = outcome.ips
-            guard !seeds.isEmpty else {
-                lines.append("DoH 没有任何端点返回地址")
-                lines.append("各端点：" + outcome.report.joined(separator: "  "))
-                return lines.joined(separator: "\n")
-            }
-            lines.append("DoH 解析到 \(seeds.count) 个：\(seeds.prefix(6).joined(separator: ", "))")
             lines.append("各端点：" + outcome.report.joined(separator: "  "))
+            if seeds.isEmpty {
+                lines.append("DoH 没有任何端点返回地址")
+            } else {
+                lines.append("DoH 解析到 \(seeds.count) 个：\(seeds.joined(separator: ", "))")
+            }
         } else {
-            lines.append("使用手填地址 \(seeds.count) 个：\(seeds.prefix(4).joined(separator: ", "))")
+            lines.append("使用手填地址 \(seeds.count) 个：\(seeds.joined(separator: ", "))")
+        }
+        for ip in Self.bootstrapIPs where !seeds.contains(ip) {
+            seeds.append(ip)
         }
 
-        guard !seeds.isEmpty else {
-            return lines.joined(separator: "\n") + "\n没有可用地址"
+        let candidates = Self.expandNeighbours(seeds)
+        lines.append("候选（含同段邻居）\(candidates.count) 个")
+
+        // 逐个实测，全部并发，最多 6 秒。
+        let targets = Array(candidates.prefix(6))
+        var probeResults: [String: (String, String)] = [:]
+        await withTaskGroup(of: (String, String, String).self) { group in
+            for ip in targets {
+                group.addTask {
+                    async let plain = self.tlsProbe(ip: ip, host: host, sni: host, timeout: 5)
+                    async let dotted = self.tlsProbe(ip: ip, host: host, sni: host + ".", timeout: 5)
+                    let (a, b) = await (plain, dotted)
+                    return (ip, a, b)
+                }
+            }
+            for await (ip, plain, dotted) in group {
+                probeResults[ip] = (plain, dotted)
+            }
         }
 
         lines.append("")
-        for ip in Array(seeds.prefix(2)) {
-            async let plain = tlsProbe(ip: ip, host: host, sni: host, timeout: 6)
-            async let dotted = tlsProbe(ip: ip, host: host, sni: host + ".", timeout: 6)
-            let (plainResult, dottedResult) = await (plain, dotted)
+        for ip in targets {
+            guard let result = probeResults[ip] else { continue }
             lines.append("\(ip)")
-            lines.append("  普通 SNI：\(plainResult)")
-            lines.append("  尾点 SNI：\(dottedResult)")
+            lines.append("  普通 SNI：\(result.0)")
+            lines.append("  尾点 SNI：\(result.1)")
         }
 
         lines.append("")
