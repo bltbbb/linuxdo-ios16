@@ -68,7 +68,6 @@ final class DirectTransport {
         }
 
         let probeTimeout = min(timeout, 4)
-        var lastError: Error?
 
         // 先走 CFNetwork 的 socket stream：URLSession 能出网而 NWConnection 全挂的
         // 环境下，只有这条路能建连。
@@ -89,7 +88,7 @@ final class DirectTransport {
             return winner.1
         }
 
-        throw lastError ?? TransportError.connect("所有候选地址均不可达（\(candidates.count) 个）")
+        throw TransportError.connect("所有候选地址均不可达（\(candidates.count) 个）")
     }
 
     /// 并发探测：每个候选各自有硬超时，谁先打通就用谁。

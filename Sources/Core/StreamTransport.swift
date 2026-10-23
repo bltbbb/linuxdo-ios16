@@ -86,7 +86,7 @@ enum StreamTransport {
             kCFStreamSSLValidatesCertificateChain as String: false
         ]
         CFReadStreamSetProperty(
-            rawRead, kCFStreamPropertySSLSettings, settings as CFDictionary
+            rawRead, CFStreamPropertyKey(rawValue: kCFStreamPropertySSLSettings), settings as CFDictionary
         )
 
         let deadline = Date().addingTimeInterval(timeout)
@@ -126,7 +126,9 @@ enum StreamTransport {
 
     /// 手动校验证书链：SNI 带尾点，但比对用的是去掉尾点的规范域名。
     private static func verifyPeer(_ stream: CFReadStream, host: String) throws {
-        guard let raw = CFReadStreamCopyProperty(stream, kCFStreamPropertySSLPeerCertificates),
+        guard let raw = CFReadStreamCopyProperty(
+            stream, CFStreamPropertyKey(rawValue: kCFStreamPropertySSLPeerCertificates)
+        ),
               let certificates = raw as? [SecCertificate],
               !certificates.isEmpty else {
             throw StreamError.tls("服务器没有提供证书")
