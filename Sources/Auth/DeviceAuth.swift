@@ -15,7 +15,9 @@ import Security
 enum DeviceAuthConfig {
     /// Discourse 用 client_id 区分客户端，bundle id 足够。
     static let clientId = "com.example.linuxdoclient"
-    static let scopes = ["read", "write", "notifications", "session_info"]
+    /// 与原版二进制里出现的 scope 集合对齐（原版只出现 read / write / notifications / user，
+    /// 没有 session_info）。多申请一个不存在的 scope 会被判非法，整个请求 403。
+    static let scopes = ["read", "write", "notifications"]
     static let applicationName = "LinuxDoClient"
 
 }
