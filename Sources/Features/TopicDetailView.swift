@@ -137,7 +137,7 @@ struct TopicDetailView: View {
                 if let views = viewModel.detail?.views {
                     Label("\(views)", systemImage: "eye")
                 }
-                if let tags = viewModel.detail?.tags, !tags.isEmpty {
+                if let tags = viewModel.detail?.tagNames, !tags.isEmpty {
                     Text(tags.prefix(3).map { "#\($0)" }.joined(separator: " "))
                 }
             }

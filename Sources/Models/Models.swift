@@ -89,7 +89,7 @@ struct TopicDetailResponse: Decodable {
     let postsCount: Int
     let views: Int?
     let categoryId: Int?
-    let tags: [String]?
+    let tags: [TagValue]?
     let postStream: PostStream
 
     enum CodingKeys: String, CodingKey {
@@ -97,6 +97,11 @@ struct TopicDetailResponse: Decodable {
         case postsCount = "posts_count"
         case categoryId = "category_id"
         case postStream = "post_stream"
+    }
+
+    /// 只取标签名，屏蔽不同站点的结构差异。
+    var tagNames: [String] {
+        (tags ?? []).map(\.name).filter { !$0.isEmpty }
     }
 }
 
@@ -163,5 +168,29 @@ struct PostStreamResponse: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case postStream = "post_stream"
+    }
+}
+
+/// Discourse 的 `tags` 在部分站点/插件下返回对象数组
+/// （`{"id":1,"name":"tag","slug":"tag"}`），而不是字符串数组。两种都接受。
+struct TagValue: Decodable, Hashable {
+    let name: String
+
+    private struct TagObject: Decodable {
+        let name: String?
+        let slug: String?
+    }
+
+    init(from decoder: Decoder) throws {
+        let single = try decoder.singleValueContainer()
+        if let text = try? single.decode(String.self) {
+            name = text
+            return
+        }
+        if let object = try? single.decode(TagObject.self) {
+            name = object.name ?? object.slug ?? ""
+            return
+        }
+        name = ""
     }
 }
