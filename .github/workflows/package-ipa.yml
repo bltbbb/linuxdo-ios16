@@ -57,7 +57,10 @@ jobs:
           ls -lh ../rust/lib
 
       - name: Generate Xcode project
-        run: xcodegen generate
+        run: |
+          xcodegen generate
+          echo "--- 桥接头解析结果 ---"
+          xcodebuild -project LinuxDoClient.xcodeproj -target LinuxDoClient -showBuildSettings 2>/dev/null | grep -i "BRIDGING_HEADER" || echo "(未解析到)"
 
       # ---------- 可选：导入签名身份 ----------
       - name: Import signing certificate and profile
