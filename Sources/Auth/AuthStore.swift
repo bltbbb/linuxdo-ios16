@@ -291,6 +291,46 @@ final class AuthStore: ObservableObject {
         }
     }
 
+    // MARK: - 粘贴 Cookie 登录（站点唯一承认的方式）
+
+    /// 用户从电脑浏览器复制会话 cookie（如 `_t=...`）粘进来。
+    /// 之后的请求全部带这个 cookie，GET 不需要 CSRF，站点也拦不住。
+    func signInWithCookie(_ raw: String) async {
+        let host = client.baseURL.host ?? "linux.do"
+        let cookies = CookieImporter.parse(raw, host: host)
+        guard !cookies.isEmpty else {
+            errorMessage = "没解析到有效 Cookie，请粘贴形如 _t=xxxx 的内容"
+            return
+        }
+
+        isBusy = true
+        errorMessage = nil
+        defer { isBusy = false }
+
+        for cookie in cookies {
+            HTTPCookieStorage.shared.setCookie(cookie)
+        }
+
+        do {
+            guard let user = try await client.currentUser() else {
+                errorMessage = "Cookie 无效或已过期"
+                    + "（/session/current.json 未返回用户）｜cookie=\(client.cookieDiagnostics())"
+                return
+            }
+            currentUser = user
+            cancelComputerLogin()
+            cancelDeviceLogin()
+            needsSecondFactor = false
+            errorMessage = nil
+        } catch {
+            var message = "Cookie 验证失败：\(error.localizedDescription)"
+            if let diagnostics = await diagnosticsSuffix() {
+                message += "\n\n" + diagnostics
+            }
+            errorMessage = message
+        }
+    }
+
     // MARK: - 手动粘贴 API Key（保底路径）
 
     func signInWithAPIKey(_ raw: String) async {

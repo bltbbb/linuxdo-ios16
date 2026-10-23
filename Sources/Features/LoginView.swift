@@ -14,6 +14,7 @@ struct LoginView: View {
     @State private var encryptedResult = ""
     @State private var copiedLink = false
     @State private var apiKeyInput = ""
+    @State private var cookieInput = ""
     @FocusState private var focused: Field?
 
     var body: some View {
@@ -57,6 +58,29 @@ struct LoginView: View {
                     Text("手动粘贴 API Key")
                 } footer: {
                     Text("任何途径拿到的 User API Key 都能粘到这里。这条路径不发起授权、不打开网页，只校验这个 key 能否读到你的账号。")
+                }
+
+                Section {
+                    TextEditor(text: $cookieInput)
+                        .frame(minHeight: 70)
+                        .font(.caption.monospaced())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .accessibilityLabel("登录 Cookie")
+                    Button {
+                        focused = nil
+                        Task { await auth.signInWithCookie(cookieInput) }
+                    } label: {
+                        Label("用这个 Cookie 登录", systemImage: "checkmark.shield")
+                    }
+                    .disabled(
+                        auth.isBusy
+                            || cookieInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
+                } header: {
+                    Text("粘贴登录 Cookie（推荐）")
+                } footer: {
+                    Text("电脑浏览器登录 linux.do → 按 F12 → Application → Cookies → https://linux.do → 复制 _t 的值贴到这里。这是站点唯一承认的认证方式，且全部走原生请求，手机不打开任何网页。")
                 }
 
                 if auth.needsSecondFactor {
