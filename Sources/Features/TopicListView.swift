@@ -169,6 +169,7 @@ struct TopicListView: View {
             }
             .sheet(isPresented: $showsNetworkSettings) {
                 NetworkSettingsView()
+                    .environmentObject(auth)
             }
         }
     }

@@ -5,6 +5,7 @@ import UIKit
 struct NetworkSettingsView: View {
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var auth: AuthStore
 
     @State private var input: String = NetworkSettings.customIPs.joined(separator: ", ")
     @State private var baseURLInput: String = NetworkSettings.customBaseURL?.absoluteString ?? ""
@@ -127,6 +128,32 @@ struct NetworkSettingsView: View {
                         Label("清空并恢复默认", systemImage: "trash")
                     }
                 }
+                Section {
+                    Button {
+                        Task { await auth.beginDeviceLogin() }
+                    } label: {
+                        Label("测试设备码登录", systemImage: "number.square")
+                    }
+                    if let code = auth.deviceCode {
+                        Text("user_code：\(code.userCode)\n验证地址：\(code.verificationUriComplete.isEmpty ? code.verificationUri : code.verificationUriComplete)")
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                    }
+                    if auth.isPolling {
+                        Text("正在轮询授权结果…").font(.caption).foregroundColor(.secondary)
+                    }
+                    if let error = auth.errorMessage {
+                        Text(error)
+                            .font(.caption.monospaced())
+                            .foregroundColor(.red)
+                            .textSelection(.enabled)
+                    }
+                } header: {
+                    Text("设备码登录（测试）")
+                } footer: {
+                    Text("不会退出当前登录。失败只显示错误；成功才会替换为新会话。\n拿到 user_code 后，用「通过 Cloudflare 验证」那个页面打开验证地址完成授权。")
+                }
+
                 Section {
                     HStack {
                         Text("版本")
