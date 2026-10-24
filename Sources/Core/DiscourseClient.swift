@@ -134,7 +134,19 @@ final class DiscourseClient {
     // MARK: - Cookie（由同一个 URLSession 自动接收和发送）
 
     private func currentCookies() -> [HTTPCookie] {
-        HTTPCookieStorage.shared.cookies(for: baseURL) ?? []
+        let all = HTTPCookieStorage.shared.cookies(for: baseURL) ?? []
+        // 同名 Cookie 只保留一枚：WebView 抓取和导入可能产生域名不同的重复项，
+        // 重复的 cf_clearance / _t 会让服务端会话判定出错，表现为莫名的 403。
+        var seen = Set<String>()
+        var unique: [HTTPCookie] = []
+        for cookie in all.sorted(by: { $0.domain.count > $1.domain.count }) where !cookie.name.isEmpty {
+            if seen.insert(cookie.name).inserted {
+                unique.append(cookie)
+            } else {
+                HTTPCookieStorage.shared.deleteCookie(cookie)
+            }
+        }
+        return unique
     }
 
     /// 诊断用：列出当前 cookie 名。
