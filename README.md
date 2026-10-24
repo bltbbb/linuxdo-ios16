@@ -30,8 +30,11 @@ iOS 16.3 上的论坛前端存在浏览器内核兼容问题，换成系统认�
 
 账号密码登录仍作为备用入口，但网站拒绝原生请求时不会自动转到手机浏览器。
 设备码并不意味着无需浏览器：申请和轮询可以走 HTTP，用户授权通常仍需另一设备打开网页。
-原版 IPA 虽然含有 `/login/device/code` 和 `/login/oauth/access_token` 字符串，
-现有候选实现的完整协议尚未确认，因此未将其作为可用入口展示。
+原版 IPA 的设备授权模型还包含 `sessionCookie`、`registrationToken`、`registrationRequired`、
+`identityToken`、`authorizationCode`、`nonce` 等字段。轮询令牌请求使用的固定 `client_id` 是
+`discourse-ios`，与申请设备码时的应用标识分开；当前实现已按这个差异修正。
+轮询优先接收 `sessionCookie` 并恢复 `_t` 会话，只有没有 Cookie 时才使用 `access_token`。
+设备码初始请求的完整字段和站点是否要求设备注册仍需真实响应验证，不能仅凭字符串推断已经完整复刻。
 
 ## 原生登录 403 的诊断
 

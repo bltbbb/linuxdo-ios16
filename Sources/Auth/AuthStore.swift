@@ -210,6 +210,24 @@ final class AuthStore: ObservableObject {
                         deviceCode: code.deviceCode
                     )
 
+                    if let cookie = token.sessionCookie, !cookie.isEmpty {
+                        let host = self.client.baseURL.host ?? "linux.do"
+                        for item in CookieImporter.parse(cookie, host: host) {
+                            HTTPCookieStorage.shared.setCookie(item)
+                        }
+                        guard let user = try await self.client.currentUser() else {
+                            throw DiscourseError.unauthorized
+                        }
+                        CookieVault.save(self.client.currentCookieHeader() ?? cookie)
+                        self.currentUser = user
+                        self.hasStoredSession = true
+                        self.deviceCode = nil
+                        self.isPolling = false
+                        self.needsSecondFactor = false
+                        self.errorMessage = nil
+                        return
+                    }
+
                     if let access = token.accessToken, !access.isEmpty {
                         try TokenStore.save(access)
                         self.client.setApiKey(access)
@@ -223,7 +241,9 @@ final class AuthStore: ObservableObject {
 
                     switch token.error {
                     case "slow_down":
-                        interval += 5
+                        interval = max(interval + 5, TimeInterval(token.retryAfter ?? 0))
+                    case "authorization_pending", "authorization_pending_device", nil:
+                        continue
                     case "access_denied":
                         self.isPolling = false
                         self.deviceCode = nil
@@ -234,8 +254,16 @@ final class AuthStore: ObservableObject {
                         self.deviceCode = nil
                         self.errorMessage = "授权码已过期，请重新开始"
                         return
+                    case "registration_required":
+                        self.isPolling = false
+                        self.deviceCode = nil
+                        self.errorMessage = "站点要求先完成注册：\(token.errorDescription ?? "需要在浏览器完成账号信息")"
+                        return
                     default:
-                        continue
+                        self.isPolling = false
+                        self.deviceCode = nil
+                        self.errorMessage = token.errorDescription ?? "设备授权失败：\(token.error ?? "未知错误")"
+                        return
                     }
                 } catch {
                     continue

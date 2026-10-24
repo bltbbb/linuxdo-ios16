@@ -134,7 +134,7 @@ struct LoginView: View {
         }
     }
 
-    // MARK: - 设备码（站点已关闭该功能）
+    // MARK: - 设备码（原版协议兼容路径）
 
     private var deviceSection: some View {
         Section {
@@ -184,7 +184,7 @@ struct LoginView: View {
         } header: {
             Text("设备码（原版同款）")
         } footer: {
-            Text("实测返回 403 / error_type=invalid_access：站点未开启 enable_user_api_key_device_authorization。")
+            Text("原版设备授权包含 sessionCookie、registrationToken 等字段；当前会优先接收服务器返回的会话 Cookie，再回退到 access_token。若仍返回 403，需要记录完整错误类型和响应字段。")
         }
     }
 

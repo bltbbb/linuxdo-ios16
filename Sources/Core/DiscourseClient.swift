@@ -449,10 +449,13 @@ final class DiscourseClient {
 
     /// 第二步：轮询换 token。授权未完成时返回 `error = authorization_pending`。
     func pollDeviceToken(clientId: String, deviceCode: String) async throws -> DeviceTokenResponse {
+        // 原版使用 `discourse-ios` 交换令牌；保留调用方参数只作为兼容回退。
         let fields: [String: String] = [
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             "device_code": deviceCode,
-            "client_id": clientId
+            "client_id": clientId == DeviceAuthConfig.clientId
+                ? DeviceAuthConfig.tokenClientId
+                : clientId
         ]
 
         var (data, http) = try await postFormRaw("/login/oauth/access_token", fields: fields, withCSRF: false)

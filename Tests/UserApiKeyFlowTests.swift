@@ -3,6 +3,46 @@ import Security
 @testable import LinuxDoClient
 
 final class UserApiKeyFlowTests: XCTestCase {
+    func testOriginalDeviceTokenFieldsAreDecoded() throws {
+        let data = Data(#"{
+          "sessionCookie": "_t=会话值",
+          "registrationToken": "注册令牌",
+          "username": "user",
+          "name": "用户",
+          "registrationRequired": false,
+          "retryAfter": 7,
+          "identityToken": "identity",
+          "authorizationCode": "authorization",
+          "nonce": "nonce"
+        }"#.utf8)
+        let response = try JSONDecoder().decode(DeviceTokenResponse.self, from: data)
+        XCTAssertEqual(response.sessionCookie, "_t=会话值")
+        XCTAssertEqual(response.registrationToken, "注册令牌")
+        XCTAssertEqual(response.retryAfter, 7)
+        XCTAssertEqual(response.identityToken, "identity")
+        XCTAssertEqual(response.authorizationCode, "authorization")
+        XCTAssertFalse(response.registrationRequired ?? true)
+    }
+
+    func testOriginalDeviceCodeAliasesAreDecoded() throws {
+        let data = Data(#"{
+          "deviceCode": "device",
+          "userCode": "ABCD",
+          "verificationURL": "https://example.com/activate",
+          "expiresAt": "2099-01-01T00:00:00Z",
+          "interval": 4,
+          "client_id": "org.linuxdo.community",
+          "registration_token": "registration"
+        }"#.utf8)
+        let response = try JSONDecoder().decode(DeviceCodeResponse.self, from: data)
+        XCTAssertEqual(response.deviceCode, "device")
+        XCTAssertEqual(response.userCode, "ABCD")
+        XCTAssertEqual(response.verificationUri, "https://example.com/activate")
+        XCTAssertEqual(response.interval, 4)
+        XCTAssertEqual(response.clientId, "org.linuxdo.community")
+        XCTAssertEqual(response.registrationToken, "registration")
+    }
+
     func testComputerAuthorizationHasNoRedirect() throws {
         let url = try UserApiKeyAuthorization.makeURL(
             baseURL: XCTUnwrap(URL(string: "https://example.com")),
