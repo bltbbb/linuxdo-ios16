@@ -194,3 +194,37 @@ struct TagValue: Decodable, Hashable {
         name = ""
     }
 }
+
+// MARK: - 分类
+
+struct CategoryListResponse: Decodable {
+    let categoryList: CategoryList
+
+    enum CodingKeys: String, CodingKey {
+        case categoryList = "category_list"
+    }
+}
+
+struct CategoryList: Decodable {
+    let categories: [Category]
+}
+
+struct Category: Codable, Identifiable, Hashable {
+    let id: Int
+    let name: String
+    let slug: String?
+    let color: String?
+    let topicCount: Int?
+    let parentCategoryId: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, slug, color
+        case topicCount = "topic_count"
+        case parentCategoryId = "parent_category_id"
+    }
+}
+
+/// /search.json 的响应：只取主题列表，足够列表展示。
+struct SearchResponse: Decodable {
+    let topics: [TopicSummary]?
+}

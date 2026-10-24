@@ -184,7 +184,7 @@ struct LoginView: View {
         } header: {
             Text("设备码（原版同款）")
         } footer: {
-            Text("原版设备授权包含 sessionCookie、registrationToken 等字段；当前会优先接收服务器返回的会话 Cookie，再回退到 access_token。若仍返回 403，需要记录完整错误类型和响应字段。")
+            Text("原版设备授权还要求 App Attest 和 mTLS 设备证书。此复刻目前只能解析返回结果，无法伪造原版签名身份；如果申请接口返回 invalid_access，通常是设备证明缺失。")
         }
     }
 

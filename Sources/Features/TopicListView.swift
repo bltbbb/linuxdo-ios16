@@ -32,6 +32,9 @@ final class TopicListViewModel: ObservableObject {
     @Published private(set) var feed: Feed = .latest
     @Published var errorMessage: String?
 
+    @Published private(set) var categories: [Category] = []
+    @Published private(set) var categoryId: Int?
+
     private let client: DiscourseClient
     private let cache: CacheRepository
     private var page = 0
@@ -56,7 +59,10 @@ final class TopicListViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        let key = AppConfig.CacheKey.topicList(feed.rawValue, page: page)
+        let key = AppConfig.CacheKey.topicList(
+            feed.rawValue + "-c" + String(categoryId ?? 0),
+            page: page
+        )
 
         if reset, let cached = cache.cachedTopicList(key: key), !cached.isEmpty {
             topics = cached
@@ -64,7 +70,7 @@ final class TopicListViewModel: ObservableObject {
         }
 
         do {
-            let result = try await client.feed(path: feed.path, page: page)
+            let result = try await client.feed(path: feed.path, page: page, categoryId: categoryId)
             if reset {
                 topics = result.topics
             } else {
@@ -82,6 +88,21 @@ final class TopicListViewModel: ObservableObject {
         }
     }
 
+    func loadCategories() async {
+        guard categories.isEmpty else { return }
+        categories = (try? await client.categories()) ?? []
+    }
+
+    func selectCategory(_ id: Int?) async {
+        guard id != categoryId else { return }
+        categoryId = id
+        page = 0
+        topics = []
+        users = [:]
+        hasMore = false
+        await load(reset: true)
+    }
+
     func loadNextPageIfNeeded(current topic: TopicSummary) async {
         guard hasMore, !isLoading else { return }
         let threshold = max(topics.count - 5, 0)
@@ -96,6 +117,15 @@ struct TopicListView: View {
     @EnvironmentObject private var auth: AuthStore
     @StateObject private var viewModel = TopicListViewModel()
     @State private var showsNetworkSettings = false
+    @State private var showsSearch = false
+
+    private var currentCategoryName: String {
+        guard let id = viewModel.categoryId,
+              let category = viewModel.categories.first(where: { $0.id == id }) else {
+            return "全部"
+        }
+        return category.name
+    }
 
     var body: some View {
         NavigationStack {
@@ -132,6 +162,29 @@ struct TopicListView: View {
             .navigationTitle(viewModel.feed.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Menu {
+                        Button("全部") { Task { await viewModel.selectCategory(nil) } }
+                        ForEach(viewModel.categories) { category in
+                            Button(category.name) {
+                                Task { await viewModel.selectCategory(category.id) }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text(currentCategoryName)
+                            Image(systemName: "chevron.down").font(.caption2)
+                        }
+                        .font(.subheadline)
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showsSearch = true
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
                         Text(auth.displayName)
@@ -163,9 +216,13 @@ struct TopicListView: View {
                 }
             }
             .task {
+                await viewModel.loadCategories()
                 if viewModel.topics.isEmpty {
                     await viewModel.load(reset: true)
                 }
+            }
+            .sheet(isPresented: $showsSearch) {
+                SearchView()
             }
             .sheet(isPresented: $showsNetworkSettings) {
                 NetworkSettingsView()

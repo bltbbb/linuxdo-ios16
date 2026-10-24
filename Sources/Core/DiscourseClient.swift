@@ -547,13 +547,17 @@ final class DiscourseClient {
         let hasMore: Bool
     }
 
-    func feed(path: String, page: Int = 0) async throws -> FeedPage {
+    func feed(path: String, page: Int = 0, categoryId: Int? = nil) async throws -> FeedPage {
+        var query = [
+            URLQueryItem(name: "page", value: String(page)),
+            URLQueryItem(name: "per_page", value: String(AppConfig.perPage))
+        ]
+        if let categoryId = categoryId {
+            query.append(URLQueryItem(name: "category", value: String(categoryId)))
+        }
         let response = try await get(
             path,
-            query: [
-                URLQueryItem(name: "page", value: String(page)),
-                URLQueryItem(name: "per_page", value: String(AppConfig.perPage))
-            ],
+            query: query,
             as: TopicListResponse.self
         )
         var map: [Int: DiscourseUser] = [:]
@@ -567,6 +571,25 @@ final class DiscourseClient {
 
     func topicDetail(id: Int) async throws -> TopicDetailResponse {
         try await get("/t/\(id).json", as: TopicDetailResponse.self)
+    }
+
+    /// 站点分类列表。
+    func categories() async throws -> [Category] {
+        let response = try await get("/categories.json", as: CategoryListResponse.self)
+        return response.categoryList.categories
+    }
+
+    /// 搜索主题。
+    func search(term: String, page: Int = 0) async throws -> [TopicSummary] {
+        let response = try await get(
+            "/search.json",
+            query: [
+                URLQueryItem(name: "q", value: term),
+                URLQueryItem(name: "page", value: String(page))
+            ],
+            as: SearchResponse.self
+        )
+        return response.topics ?? []
     }
 
     /// 分页加载帖子正文，用于 detail 首屏之后的续读。

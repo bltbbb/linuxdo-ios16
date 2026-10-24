@@ -36,6 +36,23 @@ iOS 16.3 上的论坛前端存在浏览器内核兼容问题，换成系统认�
 轮询优先接收 `sessionCookie` 并恢复 `_t` 会话，只有没有 Cookie 时才使用 `access_token`。
 设备码初始请求的完整字段和站点是否要求设备注册仍需真实响应验证，不能仅凭字符串推断已经完整复刻。
 
+## 设备码 403 的根因
+
+对原版 IPA 的进一步静态分析发现，设备授权服务不是普通 OAuth 设备码客户端：
+
+- `DeviceAuthorizationService` 持有 `prepare`、`deviceCheckTokenProvider` 和设备 ID。
+- API 请求模型包含 `requiresAttest`、`requiresClientCertificate`。
+- 原版包含 `AttestationService`、`DeviceCertificateManager`、`SystemAppAttestDevice`、`DCAppAttestService`。
+- 二进制中有 `/attest/challenge`、`X-App-Attest-Assertion`、`X-Device-Check-Token`、`mtls_certificate_pem`。
+- 签名权限包含原版的 App Attest entitlement 和原始 App ID。
+
+因此，`POST /login/device/code` 返回 `403 invalid_access` 且 `CF挑战=否`，与 Cloudflare、CSRF 或 DoH 无关，
+最符合“缺少原版的 App Attest / DeviceCheck / mTLS 设备证书”。当前复刻即使把 JSON、`client_id` 和响应字段全部对齐，
+也不能在一个不同 Bundle ID、不同签名团队的 iOS 16 应用里生成原版服务器认可的设备证明。Apple 的 App Attest 设计本身就是让服务器验证 App 身份和一次性挑战，[官方说明](https://developer.apple.com/documentation/devicecheck/establishing-your-app-s-integrity)。
+
+当前日志说明 DoH 链路已经正常：`GET /latest.json → 200`，认证接口也到达论坛应用层；继续安装证书、切换代理或调整 CSRF 不会解决这个 403。
+可行的登录路线是导入完整浏览器会话 Cookie，或在原版签名环境中完成设备授权后复用其会话。仅凭当前 IPA 和 iOS 16 重写工程无法独立复刻这套设备证明。
+
 ## 原生登录 403 的诊断
 
 已有日志只能证明 `/session` 请求遭拒，不能证明密码错误、CSRF 错误或 Cloudflare 挑战：

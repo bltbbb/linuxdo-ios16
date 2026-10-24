@@ -1,8 +1,9 @@
 import Foundation
 import Security
 
-/// 站点定制设备码登录的候选实现。
-/// 原版 IPA 含有下列端点字符串，但响应格式和令牌语义尚未核实，不能等同于标准 Discourse 协议。
+/// 站点定制设备码登录的协议模型。
+/// 静态分析显示原版在申请设备码前还会准备 App Attest 和 mTLS 客户端证书；
+/// 本文件只负责解析设备码/轮询响应，不能替代那套设备证明。
 ///
 /// 流程：
 /// 1. `POST /login/device/code` 拿 device_code + user_code + verification_uri
@@ -11,7 +12,7 @@ import Security
 /// 4. 拿到 access_token（即 Discourse 的 user API key）
 /// 5. 之后所有请求带 `User-Api-Key: <token>`
 ///
-/// 关键点：整个过程不碰 WKWebView，不需要 cookie 会话，也不需要 CSRF。
+/// 设备码轮询本身不依赖 CSRF；首次申请是否允许取决于服务端的设备证明。
 enum DeviceAuthConfig {
     /// 复刻原版：client_id 直接沿用原版 bundle id。
     /// 站点若按 client_id 做白名单，只有这个值能通过。
