@@ -1,5 +1,34 @@
 import Foundation
 
+
+/// 记录最近一次请求实际协商到的 HTTP 版本。
+///
+/// Cloudflare 对 h3 与 h2 的处理可能不同，用户报「连不上」时，
+/// 需要先确认到底有没有真的走 QUIC，否则会误判成网络不可达。
+final class ProtocolCollector: NSObject, URLSessionTaskDelegate {
+
+    static let shared = ProtocolCollector()
+
+    private let lock = NSLock()
+    private var stored: String?
+
+    var lastProtocolName: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didFinishCollecting metrics: URLSessionTaskMetrics
+    ) {
+        guard let name = metrics.transactionMetrics.last?.networkProtocolName else { return }
+        lock.lock()
+        stored = name
+        lock.unlock()
+    }
+}
 enum DiscourseError: LocalizedError {
     case badURL
     case http(Int, String)
@@ -52,7 +81,7 @@ final class DiscourseClient {
 
     init(baseURL: URL = AppConfig.baseURL) {
         self.defaultBaseURL = baseURL
-        self.session = Self.makeSession(proxyPort: nil)
+        self.session = Self.makeSession(proxyPort: nil, preferQUIC: NetworkSettings.preferQUIC)
     }
 
     /// 切换本地代理：非 nil 时所有请求经 127.0.0.1:port，由 Rust 代理用 ECH 出去。
@@ -60,12 +89,33 @@ final class DiscourseClient {
         guard port != proxyPort else { return }
         proxyPort = port
         session.invalidateAndCancel()
-        session = Self.makeSession(proxyPort: port)
+        session = Self.makeSession(proxyPort: port, preferQUIC: NetworkSettings.preferQUIC)
     }
 
+    /// 切换 QUIC 模式。需要用新配置重建 session 才生效。
+    func setPreferQUIC(_ enabled: Bool) {
+        NetworkSettings.preferQUIC = enabled
+        session.invalidateAndCancel()
+        session = Self.makeSession(proxyPort: proxyPort, preferQUIC: enabled)
+    }
+
+
+    /// 发一次最轻的请求，只为让 URLSession 走完一次真实连接，
+    /// 好让 ProtocolCollector 记录到实际协商的协议。
+    func latestForProtocolProbe() async throws -> Data {
+        guard let url = makeURL("/session/csrf.json") else { throw DiscourseError.badURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        decorate(&req)
+        let (data, http) = try await send(req)
+        if http.statusCode >= 400 {
+            throw DiscourseError.http(http.statusCode, Self.message(from: data))
+        }
+        return data
+    }
     var isUsingProxy: Bool { proxyPort != nil }
 
-    private static func makeSession(proxyPort: Int?) -> URLSession {
+    private static func makeSession(proxyPort: Int?, preferQUIC: Bool) -> URLSession {
         let cfg = URLSessionConfiguration.default
         cfg.httpCookieStorage = HTTPCookieStorage.shared
         // 自动挂载关掉：直连和 stream 都绕开 URLSession，Cookie 统一由 decorate 手动加，
@@ -77,6 +127,16 @@ final class DiscourseClient {
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         cfg.urlCache = nil
         cfg.httpAdditionalHeaders = ["User-Agent": AppConfig.userAgent]
+        // 直接用 QUIC 出网，不等 Alt-Svc 发现。
+        //
+        // 这是原版的做法：它的连接统计是 100% HTTP/3、0% HTTP/2，一次 TCP 都没用。
+        // 走 TCP 时 TLS ClientHello 的 SNI 是明文，部分网络会直接 RST；
+        // QUIC 的握手在加密帧里，中间设备看不到域名，也就拦不住。
+        // 更重要的是，这条路用的是 Apple 自己的 TLS 栈，指纹与 Safari 一致，
+        // 而第三方库（如 aioquic）的指纹会直接被 Cloudflare 判成机器人。
+        if preferQUIC {
+            cfg.assumesHTTP3Capable = true
+        }
 
         if let port = proxyPort {
             cfg.connectionProxyDictionary = [
@@ -88,7 +148,11 @@ final class DiscourseClient {
                 "HTTPSPort": port
             ]
         }
-        return URLSession(configuration: cfg)
+        return URLSession(
+            configuration: cfg,
+            delegate: preferQUIC ? ProtocolCollector.shared : nil,
+            delegateQueue: nil
+        )
     }
 
     // MARK: - URL / headers
@@ -202,7 +266,9 @@ final class DiscourseClient {
 
         // 优先走 DoH + IP 直连（绕 DNS 污染）；失败就回退系统 DNS 的 URLSession。
         var directFailure: String?
-        if directBox.isAvailable && proxyPort == nil {
+        // QUIC 模式下不能走手写 HTTP/1.1 直连：那条路是 TCP，
+        // 正好是会被 RST 的那条。要让 URLSession 自己用 h3 出网。
+        if directBox.isAvailable && proxyPort == nil && !NetworkSettings.preferQUIC {
             do {
                 let direct = try await DirectTransport.shared.send(req)
                 await RequestLog.shared.record(

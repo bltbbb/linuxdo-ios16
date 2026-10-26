@@ -20,9 +20,41 @@ struct NetworkSettingsView: View {
     /// 只有当前网络下由 WebView 现拿的凭据才能让原生请求通过。
     @State private var showingBypass = false
 
+
+    @State private var quicEnabled = NetworkSettings.preferQUIC
+    /// 最近一次请求实际协商到的 HTTP 版本（h3 / h2 / http/1.1）。
+    @State private var lastProtocol: String?
+
     var body: some View {
         NavigationStack {
             Form {
+                // QUIC 放在最前面：这是唯一不需要梯子、不需要代理、
+                // WiFi 与蜂窝都一样的出网方式，也是原版的做法。
+                Section {
+                    Toggle("优先 QUIC / HTTP3", isOn: $quicEnabled)
+                        .onChange(of: quicEnabled) { enabled in
+                            DiscourseClient.shared.setPreferQUIC(enabled)
+                            lastProtocol = nil
+                            status = enabled
+                                ? "已切到 QUIC 模式，下次请求直接走 HTTP/3。"
+                                : "已关闭 QUIC，回到 TCP。"
+                        }
+                    Button {
+                        probeProtocol()
+                    } label: {
+                        Label("测试当前出网协议", systemImage: "speedometer")
+                    }
+                    if let lastProtocol = lastProtocol {
+                        Text("实际协议：\(lastProtocol)")
+                            .font(.caption.monospaced())
+                            .foregroundColor(.secondary)
+                    }
+                } header: {
+                    Text("QUIC（推荐）")
+                } footer: {
+                    Text("原版的连接统计是 100% HTTP/3、0% 走 TCP。走 TCP 时 TLS 握手里的域名是明文，部分网络会直接重置连接；QUIC 把握手加密，看不到域名，因此不需要梯子。\n\n点「测试当前出网协议」如果显示 h3，说明 QUIC 生效。")
+                }
+
                 Section {
                     Toggle("安全直连（DoH + ECH）", isOn: $secureDirect)
                         .onChange(of: secureDirect) { applySecureDirect($0) }
@@ -245,6 +277,28 @@ struct NetworkSettingsView: View {
             return
         }
         shareItem = ShareItem(url: url)
+    }
+
+    // MARK: - QUIC 探测
+
+    /// 发一次最轻的请求，看实际协商到的协议。
+    /// h3 说明 QUIC 生效；h2 / http/1.1 说明还在走 TCP。
+    private func probeProtocol() {
+        status = "正在测试出网协议…"
+        lastProtocol = nil
+        Task {
+            do {
+                _ = try await DiscourseClient.shared.latestForProtocolProbe()
+                let name = ProtocolCollector.shared.lastProtocolName ?? "未知"
+                lastProtocol = name
+                status = name == "h3"
+                    ? "QUIC 生效：请求走的是 HTTP/3，不需要梯子。"
+                    : "当前走的是 \(name)，QUIC 未生效（服务器未提供 h3 或 UDP 被拦）。"
+            } catch {
+                lastProtocol = ProtocolCollector.shared.lastProtocolName
+                status = "测试失败：\(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: - 其它

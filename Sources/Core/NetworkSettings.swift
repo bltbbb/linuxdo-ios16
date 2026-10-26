@@ -69,4 +69,22 @@ enum NetworkSettings {
             }
         }
     }
+
+    private static let preferQUICKey = "prefer-quic"
+
+    /// 是否优先用 QUIC/HTTP3 出网。默认开启。
+    ///
+    /// 原版的连接统计是 100% HTTP/3、0% HTTP/2，说明它完全不走 TCP。
+    /// TCP 下 TLS ClientHello 的 SNI 是明文的，部分网络直接 RST；
+    /// QUIC 握手在加密帧里，看不到域名。且走的是 Apple 原生 TLS 栈，
+    /// 指纹与 Safari 一致，不像第三方 QUIC 库那样被 Cloudflare 判成机器人。
+    static var preferQUIC: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: preferQUICKey) == nil { return true }
+            return UserDefaults.standard.bool(forKey: preferQUICKey)
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: preferQUICKey)
+        }
+    }
 }
