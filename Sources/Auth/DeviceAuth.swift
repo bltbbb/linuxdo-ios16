@@ -40,7 +40,9 @@ struct DeviceCodeResponse: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case deviceCode = "device_code"
+        case deviceCodeAlias = "deviceCode"
         case userCode = "user_code"
+        case userCodeAlias = "userCode"
         case verificationUri = "verification_uri"
         case verificationUriComplete = "verification_uri_complete"
         case verificationURL = "verificationURL"
@@ -55,8 +57,13 @@ struct DeviceCodeResponse: Decodable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        deviceCode = try c.decode(String.self, forKey: .deviceCode)
-        userCode = try c.decodeIfPresent(String.self, forKey: .userCode) ?? ""
+        // 原版同时出现过下划线与驼峰两种写法，都接受
+        deviceCode = try c.decodeIfPresent(String.self, forKey: .deviceCode)
+            ?? (try c.decodeIfPresent(String.self, forKey: .deviceCodeAlias))
+            ?? ""
+        userCode = try c.decodeIfPresent(String.self, forKey: .userCode)
+            ?? (try c.decodeIfPresent(String.self, forKey: .userCodeAlias))
+            ?? ""
         verificationUri = try c.decodeIfPresent(String.self, forKey: .verificationUri)
             ?? (try c.decodeIfPresent(String.self, forKey: .verificationURL))
             ?? (try c.decodeIfPresent(String.self, forKey: .verificationUrl))
