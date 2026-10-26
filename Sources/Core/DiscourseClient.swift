@@ -127,16 +127,8 @@ final class DiscourseClient {
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         cfg.urlCache = nil
         cfg.httpAdditionalHeaders = ["User-Agent": AppConfig.userAgent]
-        // 直接用 QUIC 出网，不等 Alt-Svc 发现。
-        //
-        // 这是原版的做法：它的连接统计是 100% HTTP/3、0% HTTP/2，一次 TCP 都没用。
-        // 走 TCP 时 TLS ClientHello 的 SNI 是明文，部分网络会直接 RST；
-        // QUIC 的握手在加密帧里，中间设备看不到域名，也就拦不住。
-        // 更重要的是，这条路用的是 Apple 自己的 TLS 栈，指纹与 Safari 一致，
-        // 而第三方库（如 aioquic）的指纹会直接被 Cloudflare 判成机器人。
-        if preferQUIC {
-            cfg.assumesHTTP3Capable = true
-        }
+        // QUIC 由每个 URLRequest 的 assumesHTTP3Capable 控制（见 decorate），
+        // URLSessionConfiguration 上没有这个开关。
 
         if let port = proxyPort {
             cfg.connectionProxyDictionary = [
@@ -164,6 +156,15 @@ final class DiscourseClient {
         return comps.url
     }
     private func decorate(_ req: inout URLRequest) {
+        // 直接用 QUIC 出网，不等 Alt-Svc 发现。
+        //
+        // 这是原版的做法：它的连接统计是 100% HTTP/3、0% HTTP/2，一次 TCP 都没用。
+        // 走 TCP 时 TLS ClientHello 的 SNI 是明文，部分网络会直接 RST；
+        // QUIC 的握手在加密帧里，中间设备看不到域名，也就拦不住。
+        // 且这条路走的是 Apple 自己的 TLS 栈，指纹与 Safari 一致。
+        if NetworkSettings.preferQUIC {
+            req.assumesHTTP3Capable = true
+        }
         req.setValue(AppConfig.userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
