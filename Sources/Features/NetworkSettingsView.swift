@@ -24,6 +24,9 @@ struct NetworkSettingsView: View {
     @State private var quicEnabled = NetworkSettings.preferQUIC
     /// 最近一次请求实际协商到的 HTTP 版本（h3 / h2 / http/1.1）。
     @State private var lastProtocol: String?
+    /// 探测结果，直接显示在按钮下方。
+    /// 之前只写进页面底部的状态区，用户点了以为没反应。
+    @State private var probeResult: String?
 
     var body: some View {
         NavigationStack {
@@ -44,10 +47,11 @@ struct NetworkSettingsView: View {
                     } label: {
                         Label("测试当前出网协议", systemImage: "speedometer")
                     }
-                    if let lastProtocol = lastProtocol {
-                        Text("实际协议：\(lastProtocol)")
+                    if let probeResult = probeResult {
+                        Text(probeResult)
                             .font(.caption.monospaced())
-                            .foregroundColor(.secondary)
+                            .foregroundColor(probeResult.hasPrefix("h3") ? .green : .secondary)
+                            .textSelection(.enabled)
                     }
                 } header: {
                     Text("QUIC（推荐）")
@@ -284,19 +288,20 @@ struct NetworkSettingsView: View {
     /// 发一次最轻的请求，看实际协商到的协议。
     /// h3 说明 QUIC 生效；h2 / http/1.1 说明还在走 TCP。
     private func probeProtocol() {
-        status = "正在测试出网协议…"
+        probeResult = "正在测试…（最多等 20 秒）"
         lastProtocol = nil
         Task {
             do {
                 _ = try await DiscourseClient.shared.latestForProtocolProbe()
                 let name = ProtocolCollector.shared.lastProtocolName ?? "未知"
                 lastProtocol = name
-                status = name == "h3"
-                    ? "QUIC 生效：请求走的是 HTTP/3，不需要梯子。"
-                    : "当前走的是 \(name)，QUIC 未生效（服务器未提供 h3 或 UDP 被拦）。"
+                probeResult = name == "h3"
+                    ? "h3 — QUIC 生效，不需要梯子"
+                    : "\(name) — 仍走 TCP，QUIC 没协商上"
             } catch {
-                lastProtocol = ProtocolCollector.shared.lastProtocolName
-                status = "测试失败：\(error.localizedDescription)"
+                let name = ProtocolCollector.shared.lastProtocolName
+                probeResult = "失败：\(error.localizedDescription)"
+                    + (name.map { "\n协议：\($0)" } ?? "")
             }
         }
     }
