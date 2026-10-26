@@ -36,18 +36,25 @@ jobs:
           xcodegen --version
 
       # 与 Package IPA 保持一致：链接 Rust 静态库才能编译
-      - name: Build DoH proxy (Rust, iOS arm64)
+      # 测试跑在模拟器上，需要额外的 ios-sim 切片，用 lipo 合成通用库
+      - name: Build DoH proxy (Rust, iOS + simulator)
         run: |
           set -euo pipefail
-          rustup target add aarch64-apple-ios
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
           git clone https://github.com/1molchuan/fluxdo_doh rust-src
           git -C rust-src checkout f1a1e96d74a696508bfbbb9c62b11f3c4d9a9b2a
           mkdir -p rust-src/certs
           cp rust/certs/ca.crt rust/certs/ca.key rust-src/certs/
           cd rust-src
-          cargo rustc --release --locked --target aarch64-apple-ios --features ech --lib --crate-type staticlib
+          for target in aarch64-apple-ios aarch64-apple-ios-sim; do
+            cargo rustc --release --locked --target "$target" --features ech --lib --crate-type staticlib
+          done
           mkdir -p ../rust/lib
-          cp target/aarch64-apple-ios/release/libdoh_proxy.a ../rust/lib/
+          lipo -create \
+            target/aarch64-apple-ios/release/libdoh_proxy.a \
+            target/aarch64-apple-ios-sim/release/libdoh_proxy.a \
+            -output ../rust/lib/libdoh_proxy.a
+          ls -lh ../rust/lib
 
       - name: Generate Xcode project
         run: xcodegen generate
