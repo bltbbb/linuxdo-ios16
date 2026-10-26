@@ -97,7 +97,11 @@ final class UserApiKeyFlowTests: XCTestCase {
 
     /// scope 必须是最小集：多要一个站点不认的 scope 会让整个请求 403。
     func testDeviceAuthScopesStayMinimal() {
-        XCTAssertEqual(DeviceAuthConfig.scopes, ["notifications", "session_info"])
+        // read 是列表/主题/搜索的基础权限，必须有；
+        // 少它会让所有请求 403「您没有权限查看请求的资源」。
+        XCTAssertTrue(DeviceAuthConfig.scopes.contains("read"))
+        XCTAssertEqual(DeviceAuthConfig.scopes, ["read", "notifications", "session_info"])
+        // write 未实测放行，多申请会让整个创码请求 403，先别加。
         XCTAssertFalse(DeviceAuthConfig.scopes.contains("write"))
         XCTAssertEqual(DeviceAuthConfig.applicationName, "LINUX DO iOS")
         XCTAssertFalse(DeviceAuthConfig.clientId.isEmpty)
