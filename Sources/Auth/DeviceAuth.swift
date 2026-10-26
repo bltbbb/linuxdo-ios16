@@ -33,16 +33,14 @@ enum DeviceAuthConfig {
 
     /// 申请的 scope。
     ///
-    /// `read` 必须有：列表、主题、搜索都靠它。
-    /// 原版授权页只显示「读取并清除通知」「读取用户会话信息」两项，
-    /// 是因为它对公开内容不带 key（游客身份读列表）；
-    /// 我们所有请求都带 `User-Api-Key`，少了 `read` 会直接吃 403
-    /// `您没有权限查看请求的资源`。
+    /// 只能申请站点放行的两项。实测把 `read` 加进来会让创码请求直接
+    /// 403 `invalid_access`（CF挑战=否，是 Discourse 自己拒的），
+    /// `validate_params` 用 `UserApiKey.allowed_scopes.superset?` 做白名单校验。
     ///
-    /// `write` 仍未实测放行，等发帖/点赞落地时再加——
-    /// `validate_params` 用 `UserApiKey.allowed_scopes.superset?` 校验，
-    /// 多申请一个站点不认的 scope 会让整个请求变 403。
-    static let scopes = ["read", "notifications", "session_info"]
+    /// 因此这把 key **读不了帖子内容**，只能读通知和会话信息。
+    /// 这正是原版的结构：读列表靠浏览器会话 cookie（`_t`），
+    /// API key 只承担通知这类个人接口。
+    static let scopes = ["notifications", "session_info"]
 }
 
 // MARK: - 创建响应
