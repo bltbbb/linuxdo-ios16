@@ -4,7 +4,8 @@ import Security
 
 final class UserApiKeyFlowTests: XCTestCase {
     func testOriginalDeviceTokenFieldsAreDecoded() throws {
-        let data = Data(#"{
+        let data = Data(#"""
+        {
           "sessionCookie": "_t=会话值",
           "registrationToken": "注册令牌",
           "username": "user",
@@ -14,7 +15,8 @@ final class UserApiKeyFlowTests: XCTestCase {
           "identityToken": "identity",
           "authorizationCode": "authorization",
           "nonce": "nonce"
-        }"#.utf8)
+        }
+        """#.utf8)
         let response = try JSONDecoder().decode(DeviceTokenResponse.self, from: data)
         XCTAssertEqual(response.sessionCookie, "_t=会话值")
         XCTAssertEqual(response.registrationToken, "注册令牌")
@@ -25,7 +27,8 @@ final class UserApiKeyFlowTests: XCTestCase {
     }
 
     func testOriginalDeviceCodeAliasesAreDecoded() throws {
-        let data = Data(#"{
+        let data = Data(#"""
+        {
           "deviceCode": "device",
           "userCode": "ABCD",
           "verificationURL": "https://example.com/activate",
@@ -33,7 +36,8 @@ final class UserApiKeyFlowTests: XCTestCase {
           "interval": 4,
           "client_id": "org.linuxdo.community",
           "registration_token": "registration"
-        }"#.utf8)
+        }
+        """#.utf8)
         let response = try JSONDecoder().decode(DeviceCodeResponse.self, from: data)
         XCTAssertEqual(response.deviceCode, "device")
         XCTAssertEqual(response.userCode, "ABCD")
