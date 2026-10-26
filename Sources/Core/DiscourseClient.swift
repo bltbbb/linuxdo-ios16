@@ -267,7 +267,14 @@ final class DiscourseClient {
 
     // MARK: - transport
 
-    private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    /// - Parameter allowKeyFallback: 403 时是否允许去掉 `User-Api-Key` 重试一次。
+    ///   公开内容（列表、主题、搜索）游客也能读，但带一个 scope 不足的 key 时
+    ///   Discourse 会判定无权限直接 403。原版就是这么做的：公开请求不带 key。
+    ///   只对 GET/HEAD 回退，POST 重试会有重复副作用。
+    private func send(
+        _ req: URLRequest,
+        allowKeyFallback: Bool = true
+    ) async throws -> (Data, HTTPURLResponse) {
         let cookieNames = HTTPCookieStorage.shared.cookies(for: req.url ?? baseURL)?.map { $0.name } ?? []
 
         // 优先走 DoH + IP 直连（绕 DNS 污染）；失败就回退系统 DNS 的 URLSession。
@@ -347,6 +354,18 @@ final class DiscourseClient {
         }
         if AuthResponseDiagnostics.isCloudflareChallenge(http) {
             throw DiscourseError.cloudflare
+        }
+        // 403 且不是 Cloudflare 挑战、且请求带了 key：说明是 scope 不足被站点拒绝。
+        // 公开内容去掉 key 用游客身份重试一次——这正是原版的做法，
+        // 它只申请 notifications/session_info，读列表时不带 key。
+        if http.statusCode == 403,
+           allowKeyFallback,
+           req.value(forHTTPHeaderField: "User-Api-Key") != nil,
+           req.httpMethod == "GET",
+           !AuthResponseDiagnostics.isCloudflareChallenge(http) {
+            var publicReq = req
+            publicReq.setValue(nil, forHTTPHeaderField: "User-Api-Key")
+            return try await send(publicReq, allowKeyFallback: false)
         }
         return (data, http)
     }
@@ -442,7 +461,8 @@ final class DiscourseClient {
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         decorate(&req)
-        let (data, http) = try await send(req)
+        // 这里必须带 key：回退成游客会让接口返回匿名，把已登录状态误判成未登录。
+        let (data, http) = try await send(req, allowKeyFallback: false)
         // Discourse 在没有当前用户时返回 404；其他失败应保留真实错误。
         if http.statusCode == 404 || http.statusCode == 401 { return nil }
         try ensureOK(data, http)
