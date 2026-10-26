@@ -47,6 +47,22 @@ struct NetworkSettingsView: View {
                     Text("开启后原生请求经本机代理，用 ECH 加密 ClientHello 出网，中间设备看不到 linux.do。\n\n首次使用：点「安装根证书」→ 存到「文件」→ 点开安装描述文件 → 设置 → 通用 → 关于本机 → 证书信任设置 → 为该证书打开完全信任。\n\n如果仍被 Cloudflare 挑战，用上面的验证页让 WebKit 亲自过盾。")
                 }
 
+                Section {
+                    Button {
+                        if let url = DohProxyService.shared.makeDNSProfile() {
+                            shareItem = ShareItem(url: url)
+                        } else {
+                            status = "生成加密 DNS 描述文件失败"
+                        }
+                    } label: {
+                        Label("安装加密 DNS（DoH）", systemImage: "lock.shield")
+                    }
+                } header: {
+                    Text("加密 DNS（推荐先装）")
+                } footer: {
+                    Text("装一次对整个系统生效，WiFi 和蜂窝都覆盖，不用再设 Wi-Fi 代理。\n\n为什么需要：网页视图走系统 DNS，被污染时会解析到假 IP、加载超时。装上后解析走 DoH，挑战页才能打开。\n\n安装后到「设置 → 通用 → VPN 与设备管理」确认已安装。")
+                }
+
                 if let status = status {
                     Section {
                         Text(status)

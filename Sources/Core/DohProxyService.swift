@@ -87,6 +87,49 @@ final class DohProxyService {
         }
     }
 
+    /// 生成系统级加密 DNS（DoH）描述文件。
+    ///
+    /// 装一次对整个系统生效，WiFi 与蜂窝都覆盖，WKWebView 也跟着走加密解析。
+    /// 这是 WebView 加载 linux.do 超时的正解：它用系统明文 DNS，
+    /// 被污染时解析到假 IP 就卡死；而 URLSession 走 App 内 DoH，所以能到 Cloudflare。
+    func makeDNSProfile() -> URL? {
+        let payload: [String: Any] = [
+            "DNSSettings": [
+                "DNSProtocol": "HTTPS",
+                "ServerURL": "https://doh.pub/dns-query"
+            ],
+            "PayloadDescription": "用 DoH 加密解析域名，避免被污染",
+            "PayloadDisplayName": "加密 DNS",
+            "PayloadIdentifier": "io.linuxdo.client.doh",
+            "PayloadType": "com.apple.dnsSettings.managed",
+            "PayloadUUID": UUID().uuidString,
+            "PayloadVersion": 1
+        ]
+        let profile: [String: Any] = [
+            "PayloadContent": [payload],
+            "PayloadDisplayName": "LINUX DO 加密 DNS",
+            "PayloadDescription": "安装后系统 DNS 走 DoH，WiFi 与蜂窝都生效。",
+            "PayloadIdentifier": "io.linuxdo.client.doh.profile",
+            "PayloadOrganization": "LinuxDoClient",
+            "PayloadRemovalDisallowed": false,
+            "PayloadType": "Configuration",
+            "PayloadUUID": UUID().uuidString,
+            "PayloadVersion": 1
+        ]
+        guard let data = try? PropertyListSerialization.data(
+            fromPropertyList: profile, format: .xml, options: 0
+        ) else { return nil }
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("linuxdo-doh.mobileconfig")
+        do {
+            try data.write(to: url)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: - 启停
 
     /// 启动代理。返回监听端口，失败返回 nil。
