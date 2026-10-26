@@ -15,6 +15,10 @@ struct NetworkSettingsView: View {
     @State private var secureDirect = DohProxyService.shared.isRunning
     @State private var shareItem: ShareItem?
     @State private var challengePort: Int?
+    /// 是否弹出安全验证页。测试入口也要走一遍 WebView 过盾：
+    /// cf_clearance 绑定出口 IP，换网络（WiFi ↔ 蜂窝）后旧的必然失效，
+    /// 只有当前网络下由 WebView 现拿的凭据才能让原生请求通过。
+    @State private var showingBypass = false
 
     var body: some View {
         NavigationStack {
@@ -130,7 +134,7 @@ struct NetworkSettingsView: View {
                 }
                 Section {
                     Button {
-                        Task { await auth.beginDeviceLogin() }
+                        showingBypass = true
                     } label: {
                         Label("测试设备码登录", systemImage: "number.square")
                     }
@@ -155,6 +159,16 @@ struct NetworkSettingsView: View {
                 }
 
                 Section {
+                    Button(role: .destructive) {
+                        Task { await auth.signOut() }
+                    } label: {
+                        Label("退出登录", systemImage: "rectangle.portrait.and.arrow.right")
+                    }
+                } footer: {
+                    Text("退出后回到登录页，可重新走设备授权流程。")
+                }
+
+                Section {
                     HStack {
                         Text("版本")
                         Spacer()
@@ -173,6 +187,11 @@ struct NetworkSettingsView: View {
                 set: { challengePort = $0?.id }
             )) { target in
                 ChallengeView(port: target.id)
+            }
+            .fullScreenCover(isPresented: $showingBypass) {
+                CloudflareBypassView {
+                    Task { await auth.beginDeviceLogin() }
+                }
             }
             .navigationTitle("网络设置")
             .navigationBarTitleDisplayMode(.inline)

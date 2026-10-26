@@ -25,8 +25,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.linuxdoclient
         PRODUCT_NAME: LinuxDoClient
-        MARKETING_VERSION: "1.5.1"
-        CURRENT_PROJECT_VERSION: "151"
+        MARKETING_VERSION: "1.5.2"
+        CURRENT_PROJECT_VERSION: "152"
         # DoH + ECH 本地代理：fluxdo_doh（GPL-3.0）交叉编译出的 Rust 静态库，CI 里构建
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/Sources/Support/DohProxyBridge.h"
         # 真机与模拟器各用各的切片：静态库两者都是 arm64，无法合成通用包
@@ -48,8 +48,8 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: LINUX DO
-        CFBundleShortVersionString: "1.5.1"
-        CFBundleVersion: "151"
+        CFBundleShortVersionString: "1.5.2"
+        CFBundleVersion: "152"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
