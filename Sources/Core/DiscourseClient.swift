@@ -431,58 +431,73 @@ final class DiscourseClient {
         resetCookies()
     }
 
-    // MARK: - 站点定制设备码登录（协议尚待验证）
+    // MARK: - 设备授权（Discourse 原生 user-api-key device flow）
 
-    /// 第一步：申请设备码。用户拿 user_code 去浏览器授权。
+    /// 第一步：创建设备码。用户拿 `userCode` 去浏览器输入。
     ///
-    /// 关于 CSRF：Discourse 的 `/login/*` 命名空间并不总是豁免 CSRF。缺 token 时
-    /// Rails 抛 `InvalidAuthenticityToken`，Discourse 把它渲染成
-    /// 403「您没有权限查看请求的资源。」——所以先不带 token 试，403/422 再带 token 重试。
-    func requestDeviceCode(clientId: String, scopes: [String]) async throws -> DeviceCodeResponse {
-        let fields: [String: String] = [
+    /// `ensure_json_request!` 要求 Content-Type 与 Accept 都是 JSON，
+    /// 不满足就在业务逻辑之前被判 InvalidAccess（403 + invalid_access）。
+    func requestDeviceCode(
+        publicKeyPEM: String,
+        nonce: String,
+        clientId: String,
+        scopes: [String],
+        applicationName: String
+    ) async throws -> DeviceCodeResponse {
+        let body: [String: Any] = [
             "client_id": clientId,
             "scopes": scopes.joined(separator: ","),
-            "application_name": DeviceAuthConfig.applicationName
+            "nonce": nonce,
+            "public_key": publicKeyPEM,
+            "application_name": applicationName
         ]
-
-        var (data, http) = try await postFormRaw("/login/device/code", fields: fields, withCSRF: false)
-        if http.statusCode == 403 || http.statusCode == 422 {
-            (data, http) = try await postFormRaw("/login/device/code", fields: fields, withCSRF: true)
-        }
-        guard http.statusCode < 400 else {
-            throw DiscourseError.http(http.statusCode, Self.message(from: data))
-        }
+        let data = try await postJSONRaw("/user-api-key/device.json", body: body)
         do {
-            return try decoder.decode(DeviceCodeResponse.self, from: data)
+            let code = try decoder.decode(DeviceCodeResponse.self, from: data)
+            guard code.isUsable else {
+                throw DiscourseError.decoding("设备码形状异常：" + Self.snippet(data))
+            }
+            return code
+        } catch let error as DiscourseError {
+            throw error
         } catch {
             throw DiscourseError.decoding("响应不是设备码 JSON：" + Self.snippet(data))
         }
     }
 
-    /// 第二步：轮询换 token。授权未完成时返回 `error = authorization_pending`。
-    func pollDeviceToken(clientId: String, deviceCode: String) async throws -> DeviceTokenResponse {
-        // 原版使用 `discourse-ios` 交换令牌；保留调用方参数只作为兼容回退。
-        let fields: [String: String] = [
-            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            "device_code": deviceCode,
-            "client_id": clientId == DeviceAuthConfig.clientId
-                ? DeviceAuthConfig.tokenClientId
-                : clientId
-        ]
-
-        var (data, http) = try await postFormRaw("/login/oauth/access_token", fields: fields, withCSRF: false)
-        if http.statusCode == 403 {
-            (data, http) = try await postFormRaw("/login/oauth/access_token", fields: fields, withCSRF: true)
-        }
-        // 轮询阶段 400 属正常语义（authorization_pending），必须解析而不是抛错
-        if http.statusCode >= 500 {
-            throw DiscourseError.http(http.statusCode, Self.message(from: data))
-        }
+    /// 第二步：轮询。授权成功后 `payload` 只返回一次，必须当场解密。
+    ///
+    /// 待授权时站点回 200 + `{"status":"authorization_pending"}`，
+    /// 所以不能按 HTTP 状态码判失败。
+    func pollDeviceAuthorization(deviceCode: String) async throws -> DevicePollResponse {
+        let data = try await postJSONRaw(
+            "/user-api-key/device/poll.json",
+            body: ["device_code": deviceCode]
+        )
         do {
-            return try decoder.decode(DeviceTokenResponse.self, from: data)
+            return try decoder.decode(DevicePollResponse.self, from: data)
+        } catch let error as DiscourseError {
+            throw error
         } catch {
             throw DiscourseError.decoding("轮询响应无法解析：" + Self.snippet(data))
         }
+    }
+
+    /// 发 JSON 请求体、不带 CSRF。设备授权这两个端点在 Discourse 里
+    /// `skip_before_action :verify_authenticity_token`，提前取 token 只是多一次请求。
+    func postJSONRaw(_ path: String, body: [String: Any]) async throws -> Data {
+        guard let url = makeURL(path) else { throw DiscourseError.badURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        decorate(&req)
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+        let (data, http) = try await send(req)
+        if http.statusCode >= 400 {
+            throw DiscourseError.http(http.statusCode, Self.message(from: data))
+        }
+        return data
     }
 
     /// POST 表单，返回原始响应。4xx 不抛错——调用方要读 body 判断语义。

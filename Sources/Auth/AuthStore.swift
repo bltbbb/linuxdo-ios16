@@ -167,23 +167,42 @@ final class AuthStore: ObservableObject {
         PendingComputerAuthorizationStore.clear()
     }
 
-    // MARK: - Device Grant（站点可能未启用）
+    // MARK: - 设备授权（Discourse 原生 user-api-key device flow）
 
+    /// 出码 → 用户在浏览器输码授权 → 轮询拿到一次性 payload → RSA 解密 → 存 key。
     func beginDeviceLogin() async {
-        guard !isBusy, !isWaitingForComputer else { return }
+        guard !isBusy else { return }
+        cancelComputerLogin()
+        cancelDeviceLogin()
         isBusy = true
         errorMessage = nil
         defer { isBusy = false }
 
+        guard let material = RSAKeyPair.generate() else {
+            errorMessage = "无法生成 RSA 密钥对"
+            return
+        }
+        let nonce = RSAKeyPair.randomNonce()
+
         do {
             let code = try await client.requestDeviceCode(
+                publicKeyPEM: material.publicKeyPEM,
+                nonce: nonce,
                 clientId: DeviceAuthConfig.clientId,
-                scopes: DeviceAuthConfig.scopes
+                scopes: DeviceAuthConfig.scopes,
+                applicationName: DeviceAuthConfig.applicationName
             )
+            try PendingDeviceAuthorizationStore.save(
+                material: material,
+                nonce: nonce,
+                deviceCode: code.deviceCode
+            )
+            rsaMaterial = material
+            pendingNonce = nonce
             deviceCode = code
             startPolling(code)
         } catch {
-            var message = error.localizedDescription
+            var message = "申请授权码失败：\(error.localizedDescription)"
             if let diagnostics = await diagnosticsSuffix() {
                 message += "\n\n" + diagnostics
             }
@@ -191,6 +210,7 @@ final class AuthStore: ObservableObject {
         }
     }
 
+    /// 轮询期间 payload 只会出现一次，拿到就必须立刻解密再停。
     private func startPolling(_ code: DeviceCodeResponse) {
         pollTask?.cancel()
         isPolling = true
@@ -198,84 +218,93 @@ final class AuthStore: ObservableObject {
         pollTask = Task { [weak self] in
             guard let self = self else { return }
             let deadline = Date().addingTimeInterval(TimeInterval(max(code.expiresIn, 60)))
-            var interval = TimeInterval(max(code.interval, 3))
+            let interval = TimeInterval(max(code.interval, 3))
 
             while !Task.isCancelled, Date() < deadline {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                if Task.isCancelled { break }
+                if Task.isCancelled { return }
 
                 do {
-                    let token = try await self.client.pollDeviceToken(
-                        clientId: DeviceAuthConfig.clientId,
+                    let poll = try await self.client.pollDeviceAuthorization(
                         deviceCode: code.deviceCode
                     )
-
-                    if let cookie = token.sessionCookie, !cookie.isEmpty {
-                        let host = self.client.baseURL.host ?? "linux.do"
-                        for item in CookieImporter.parse(cookie, host: host) {
-                            HTTPCookieStorage.shared.setCookie(item)
-                        }
-                        guard let user = try await self.client.currentUser() else {
-                            throw DiscourseError.unauthorized
-                        }
-                        CookieVault.save(self.client.currentCookieHeader() ?? cookie)
-                        self.currentUser = user
-                        self.hasStoredSession = true
-                        self.deviceCode = nil
-                        self.isPolling = false
-                        self.needsSecondFactor = false
-                        self.errorMessage = nil
-                        return
-                    }
-
-                    if let access = token.accessToken, !access.isEmpty {
-                        try TokenStore.save(access)
-                        self.client.setApiKey(access)
-                        self.currentUser = try await self.client.currentUser()
-                        self.deviceCode = nil
-                        self.isPolling = false
-                        self.needsSecondFactor = false
-                        self.errorMessage = nil
-                        return
-                    }
-
-                    switch token.error {
-                    case "slow_down":
-                        interval = max(interval + 5, TimeInterval(token.retryAfter ?? 0))
-                    case "authorization_pending", "authorization_pending_device", nil:
+                    switch poll.status {
+                    case .authorizationPending:
                         continue
-                    case "access_denied":
-                        self.isPolling = false
-                        self.deviceCode = nil
-                        self.errorMessage = "授权被拒绝"
+                    case .authorized:
+                        await self.finishDeviceLogin(payload: poll.payload)
                         return
-                    case "expired_token":
-                        self.isPolling = false
-                        self.deviceCode = nil
-                        self.errorMessage = "授权码已过期，请重新开始"
+                    case .accessDenied:
+                        await self.failDeviceLogin("授权被拒绝")
                         return
-                    case "registration_required":
-                        self.isPolling = false
-                        self.deviceCode = nil
-                        self.errorMessage = "站点要求先完成注册：\(token.errorDescription ?? "需要在浏览器完成账号信息")"
-                        return
-                    default:
-                        self.isPolling = false
-                        self.deviceCode = nil
-                        self.errorMessage = token.errorDescription ?? "设备授权失败：\(token.error ?? "未知错误")"
+                    case .expiredToken:
+                        await self.failDeviceLogin("授权码已过期，请重新开始")
                         return
                     }
                 } catch {
+                    // 单次网络抖动不该终止整轮授权，继续轮询到截止时间。
                     continue
                 }
             }
 
-            self.isPolling = false
-            if self.deviceCode != nil {
-                self.deviceCode = nil
-                self.errorMessage = "授权超时，请重新开始"
-            }
+            await self.failDeviceLogin("授权超时，请重新开始")
         }
+    }
+
+    private func finishDeviceLogin(payload: String?) async {
+        defer { isPolling = false }
+
+        guard let pending = PendingDeviceAuthorizationStore.load() else {
+            deviceCode = nil
+            errorMessage = "授权已完成，但本地私钥已失效，请重新授权"
+            return
+        }
+        guard let payload = payload, !payload.isEmpty else {
+            deviceCode = nil
+            errorMessage = "授权已完成，但站点没有返回密钥，请重新授权"
+            PendingDeviceAuthorizationStore.clear()
+            return
+        }
+
+        do {
+            let result = try UserApiKeyAuthorization.decodePayload(
+                payload,
+                expectedNonce: pending.nonce,
+                privateKey: pending.material.privateKey
+            )
+            client.setApiKey(result.key)
+            guard let user = try await client.currentUser() else {
+                throw DiscourseError.unauthorized
+            }
+            try TokenStore.save(result.key)
+            currentUser = user
+            hasStoredSession = true
+            deviceCode = nil
+            needsSecondFactor = false
+            errorMessage = nil
+            PendingDeviceAuthorizationStore.clear()
+            rsaMaterial = nil
+            pendingNonce = nil
+        } catch {
+            deviceCode = nil
+            PendingDeviceAuthorizationStore.clear()
+            var message = "解密授权结果失败：\(error.localizedDescription)"
+            if let diagnostics = await diagnosticsSuffix() {
+                message += "\n\n" + diagnostics
+            }
+            errorMessage = message
+        }
+    }
+
+    private func failDeviceLogin(_ message: String) async {
+        pollTask?.cancel()
+        pollTask = nil
+        isPolling = false
+        deviceCode = nil
+        rsaMaterial = nil
+        pendingNonce = nil
+        PendingDeviceAuthorizationStore.clear()
+        errorMessage = message
     }
 
     func cancelDeviceLogin() {
@@ -283,6 +312,7 @@ final class AuthStore: ObservableObject {
         pollTask = nil
         isPolling = false
         deviceCode = nil
+        PendingDeviceAuthorizationStore.clear()
     }
 
     // MARK: - 网页登录（兜底）

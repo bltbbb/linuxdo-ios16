@@ -9,19 +9,20 @@ struct LoginView: View {
 
     @EnvironmentObject private var auth: AuthStore
 
-    // 主路径
+    // 主路径：设备授权
+    @State private var copiedCode = false
+    @State private var copiedLink = false
+
+    // 兜底
+    @State private var showFallbacks = false
     @State private var cookieInput = ""
-
-    // 保底
     @State private var apiKeyInput = ""
-
-    // 站点已禁用的旧方式
-    @State private var showDisabledPaths = false
     @State private var account = ""
     @State private var password = ""
     @State private var code = ""
     @State private var encryptedResult = ""
-    @State private var copiedLink = false
+    /// 授权码生成时刻，用于倒计时。由 onChange 跟随 auth.deviceCode 维护。
+    @State private var codeIssuedAt: Date?
 
     @FocusState private var focused: Field?
 
@@ -39,8 +40,7 @@ struct LoginView: View {
                     }
                 }
 
-                cookieSection
-                apiKeySection
+                deviceSection
 
                 if let message = auth.errorMessage {
                     Section {
@@ -55,25 +55,119 @@ struct LoginView: View {
                 }
 
                 Section {
-                    Button(showDisabledPaths ? "收起其他方式" : "其他方式（站点已禁用）") {
-                        withAnimation { showDisabledPaths.toggle() }
+                    Button(showFallbacks ? "收起其他登录方式" : "其他登录方式") {
+                        withAnimation { showFallbacks.toggle() }
                     }
                 }
 
-                if showDisabledPaths {
-                    deviceSection
-                    passwordSection
+                if showFallbacks {
+                    cookieSection
+                    apiKeySection
                     computerSection
+                    passwordSection
                 }
             }
             .navigationTitle("LINUX DO")
-            .onAppear {
-                if account.isEmpty { focused = .account }
+            .onChange(of: auth.deviceCode?.deviceCode) { _ in
+                codeIssuedAt = auth.deviceCode == nil ? nil : Date()
             }
         }
     }
 
-    // MARK: - 登录 Cookie（唯一可用路径）
+    // MARK: - 设备授权（主路径）
+
+    private var deviceSection: some View {
+        Section {
+            if let code = auth.deviceCode {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("在浏览器打开下面的地址，输入这组授权码并确认。")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+
+                    HStack {
+                        Text(code.userCode)
+                            .font(.system(size: 30, weight: .bold, design: .monospaced))
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button {
+                            UIPasteboard.general.string = code.userCode
+                            copiedCode = true
+                        } label: {
+                            Image(systemName: copiedCode ? "checkmark" : "doc.on.doc")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("复制授权码")
+                    }
+
+                    if let url = code.activationURL {
+                        Text(url.absoluteString)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                        Button {
+                            UIPasteboard.general.string = url.absoluteString
+                            copiedLink = true
+                        } label: {
+                            Label(copiedLink ? "地址已复制" : "复制授权地址", systemImage: "doc.on.doc")
+                        }
+                    }
+
+                    if let issuedAt = codeIssuedAt {
+                        TimelineView(.periodic(from: Date(), by: 1)) { context in
+                            let deadline = issuedAt.addingTimeInterval(
+                                TimeInterval(max(code.expiresIn, 60))
+                            )
+                            let remain = max(0, Int(deadline.timeIntervalSince(context.date)))
+                            Text(
+                                remain > 0
+                                    ? "剩余 \(remain / 60):\(String(format: "%02d", remain % 60))"
+                                    : "授权码已过期，请重新获取"
+                            )
+                            .font(.caption)
+                            .foregroundColor(remain > 60 ? .secondary : .orange)
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        if auth.isPolling {
+                            ProgressView()
+                            Text("等待浏览器授权…")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("取消") { auth.cancelDeviceLogin() }
+                            .font(.footnote)
+                    }
+                }
+                .padding(.vertical, 6)
+            } else {
+                Button {
+                    focused = nil
+                    copiedCode = false
+                    copiedLink = false
+                    Task { await auth.beginDeviceLogin() }
+                } label: {
+                    HStack {
+                        Spacer()
+                        if auth.isBusy {
+                            ProgressView()
+                        } else {
+                            Label("设备授权登录", systemImage: "key.horizontal.fill").bold()
+                        }
+                        Spacer()
+                    }
+                }
+                .disabled(auth.isBusy)
+            }
+        } header: {
+            Text("登录（设备授权）")
+        } footer: {
+            Text("生成 8 位授权码后，在任意浏览器打开 linux.do/user-api-key/activate 输入即可。不需要密码，也不需要粘贴 Cookie；授权得到的密钥不会自动过期。")
+        }
+    }
+
+    // MARK: - 兜底：Cookie
 
     private var cookieSection: some View {
         Section {
@@ -93,7 +187,7 @@ struct LoginView: View {
                     if auth.isBusy {
                         ProgressView()
                     } else {
-                        Label("用这个 Cookie 登录", systemImage: "checkmark.shield").bold()
+                        Label("用这个 Cookie 登录", systemImage: "checkmark.shield")
                     }
                     Spacer()
                 }
@@ -103,13 +197,13 @@ struct LoginView: View {
                     || cookieInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             )
         } header: {
-            Text("登录（用 Cookie）")
+            Text("用 Cookie 登录")
         } footer: {
-            Text("电脑浏览器登录 linux.do → F12 → Application → Cookies → https://linux.do → 复制 _t 的值贴到上面。站点禁用了所有程序化登录（用户 API Key、设备码、原生表单都返回 403），浏览器会话 cookie 是唯一剩下的凭据。手机侧全程原生请求，不加载网页。")
+            Text("设备授权不可用时的退路：电脑浏览器登录 linux.do → F12 → Application → Cookies → 复制 _t 的值。")
         }
     }
 
-    // MARK: - 手动 API Key
+    // MARK: - 兜底：手动 API Key
 
     private var apiKeySection: some View {
         Section {
@@ -130,65 +224,64 @@ struct LoginView: View {
         } header: {
             Text("手动粘贴 API Key")
         } footer: {
-            Text("若你有管理员创建的 API Key，可直接粘贴。本站的用户 API Key 生成已被禁用。")
+            Text("如果已经在站点或用原版 App 授权过，直接粘贴那个 User API Key 也可以。")
         }
     }
 
-    // MARK: - 设备码（原版协议兼容路径）
+    // MARK: - 兜底：电脑授权（手工粘贴加密结果）
 
-    private var deviceSection: some View {
+    private var computerSection: some View {
         Section {
-            if let deviceCode = auth.deviceCode {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("在浏览器打开下面的地址，输入这组代码并授权：")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
-
-                    Text(deviceCode.userCode)
-                        .font(.system(size: 30, weight: .bold, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .textSelection(.enabled)
-
-                    Text(deviceCode.verificationUri)
-                        .font(.caption2)
-                        .textSelection(.enabled)
-
-                    Button {
-                        UIPasteboard.general.string = deviceCode.verificationUri
-                    } label: {
-                        Label("复制授权地址", systemImage: "doc.on.doc")
-                    }
-
-                    HStack {
-                        if auth.isPolling {
-                            ProgressView()
-                            Text("等待授权…")
-                                .font(.footnote)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Button("取消") { auth.cancelDeviceLogin() }
-                            .font(.footnote)
-                    }
+            if let url = auth.computerAuthorizationURL {
+                Text("1. 复制链接，到电脑浏览器登录论坛并确认授权。")
+                    .font(.footnote)
+                Button {
+                    UIPasteboard.general.string = url.absoluteString
+                } label: {
+                    Label("复制授权链接", systemImage: "doc.on.doc")
                 }
-                .padding(.vertical, 6)
+                Text("2. 把电脑网页显示的整段加密结果粘回下面。")
+                    .font(.footnote)
+                TextEditor(text: $encryptedResult)
+                    .frame(minHeight: 90)
+                    .font(.caption.monospaced())
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
+                Button {
+                    focused = nil
+                    Task {
+                        await auth.completeComputerLogin(encryptedResult: encryptedResult)
+                        if auth.isLoggedIn { encryptedResult = "" }
+                    }
+                } label: {
+                    Label("完成授权并登录", systemImage: "checkmark.shield")
+                }
+                .disabled(
+                    auth.isBusy
+                        || encryptedResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+                Button("取消本次授权", role: .cancel) {
+                    auth.cancelComputerLogin()
+                    encryptedResult = ""
+                }
             } else {
                 Button {
                     focused = nil
-                    Task { await auth.beginDeviceLogin() }
+                    encryptedResult = ""
+                    auth.beginComputerLogin()
                 } label: {
-                    Label("设备码登录", systemImage: "key.horizontal")
+                    Label("生成电脑授权链接", systemImage: "desktopcomputer")
                 }
                 .disabled(auth.isBusy)
             }
         } header: {
-            Text("设备码（原版同款）")
+            Text("电脑授权（手工粘贴）")
         } footer: {
-            Text("原版设备授权还要求 App Attest 和 mTLS 设备证书。此复刻目前只能解析返回结果，无法伪造原版签名身份；如果申请接口返回 invalid_access，通常是设备证明缺失。")
+            Text("经典 User API Key 流程：电脑打开 /user-api-key/new 授权后，把加密串贴回手机解密。设备授权走不通时可用。")
         }
     }
 
-    // MARK: - 账号密码（站点拒绝原生 POST）
+    // MARK: - 兜底：账号密码
 
     private var passwordSection: some View {
         Section {
@@ -226,62 +319,6 @@ struct LoginView: View {
             Text("账号密码")
         } footer: {
             Text("实测 POST /session 返回 403：站点拒绝非浏览器客户端提交登录。")
-        }
-    }
-
-    // MARK: - 电脑授权（站点已禁用 user api key 生成）
-
-    private var computerSection: some View {
-        Section {
-            if let url = auth.computerAuthorizationURL {
-                Text("1. 复制链接，到电脑浏览器登录论坛并确认授权。")
-                    .font(.footnote)
-                Button {
-                    UIPasteboard.general.string = url.absoluteString
-                    copiedLink = true
-                } label: {
-                    Label(copiedLink ? "链接已复制" : "复制授权链接", systemImage: "doc.on.doc")
-                }
-                Text("2. 把电脑网页显示的整段加密结果粘回下面。")
-                    .font(.footnote)
-                TextEditor(text: $encryptedResult)
-                    .frame(minHeight: 90)
-                    .font(.caption.monospaced())
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled(true)
-                Button {
-                    focused = nil
-                    Task {
-                        await auth.completeComputerLogin(encryptedResult: encryptedResult)
-                        if auth.isLoggedIn { encryptedResult = "" }
-                    }
-                } label: {
-                    Label("完成授权并登录", systemImage: "checkmark.shield")
-                }
-                .disabled(
-                    auth.isBusy
-                        || encryptedResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
-                Button("取消本次授权", role: .cancel) {
-                    auth.cancelComputerLogin()
-                    encryptedResult = ""
-                    copiedLink = false
-                }
-            } else {
-                Button {
-                    focused = nil
-                    encryptedResult = ""
-                    copiedLink = false
-                    auth.beginComputerLogin()
-                } label: {
-                    Label("生成电脑授权链接", systemImage: "desktopcomputer")
-                }
-                .disabled(auth.isBusy)
-            }
-        } header: {
-            Text("电脑授权")
-        } footer: {
-            Text("站点已禁用用户 API Key 生成（/user-api-key/new 返回「无法发布用户 API 密钥」），这条路走不通。")
         }
     }
 }

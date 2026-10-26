@@ -29,29 +29,38 @@ iOS 16.3 上的论坛前端存在浏览器内核兼容问题，换成系统认�
 输入支持纯 Base64 或带 `payload` 字段的 JSON，不接受明文密钥。
 
 账号密码登录仍作为备用入口，但网站拒绝原生请求时不会自动转到手机浏览器。
-设备码并不意味着无需浏览器：申请和轮询可以走 HTTP，用户授权通常仍需另一设备打开网页。
-原版 IPA 的设备授权模型还包含 `sessionCookie`、`registrationToken`、`registrationRequired`、
-`identityToken`、`authorizationCode`、`nonce` 等字段。轮询令牌请求使用的固定 `client_id` 是
-`discourse-ios`，与申请设备码时的应用标识分开；当前实现已按这个差异修正。
-轮询优先接收 `sessionCookie` 并恢复 `_t` 会话，只有没有 Cookie 时才使用 `access_token`。
-设备码初始请求的完整字段和站点是否要求设备注册仍需真实响应验证，不能仅凭字符串推断已经完整复刻。
+设备授权走 Discourse 原生 User API Key 设备流，不是站点私有协议：
 
-## 设备码 403 的根因
+1. `POST /user-api-key/device.json` 创建设备码，得到 `user_code` 与 64 位 `device_code`。
+2. 用户在任意浏览器打开 `/user-api-key/activate`，输入 8 位码并授权。
+3. `POST /user-api-key/device/poll.json` 轮询，状态只有
+   `authorization_pending` / `authorized` / `access_denied` / `expired_token`。
+4. `authorized` 时附带一次性 `payload`，用建码时的 RSA 私钥解密得到 `{key, nonce}`；
+   之后请求带 `User-Api-Key`。
 
-对原版 IPA 的进一步静态分析发现，设备授权服务不是普通 OAuth 设备码客户端：
+这两个 POST 在 Discourse 里是 `skip_before_action :verify_authenticity_token`，
+因此不需要 CSRF；但 `ensure_json_request!` 强制要求 `Content-Type: application/json`
+且 `Accept: application/json`，否则直接判 403。
 
-- `DeviceAuthorizationService` 持有 `prepare`、`deviceCheckTokenProvider` 和设备 ID。
-- API 请求模型包含 `requiresAttest`、`requiresClientCertificate`。
-- 原版包含 `AttestationService`、`DeviceCertificateManager`、`SystemAppAttestDevice`、`DCAppAttestService`。
-- 二进制中有 `/attest/challenge`、`X-App-Attest-Assertion`、`X-Device-Check-Token`、`mtls_certificate_pem`。
-- 签名权限包含原版的 App Attest entitlement 和原始 App ID。
+申请 scope 取站点放行的最小集 `notifications,session_info`：`validate_params` 用
+`UserApiKey.allowed_scopes.superset?` 校验，多申请一个不认的 scope 会让整个请求变 403。
 
-因此，`POST /login/device/code` 返回 `403 invalid_access` 且 `CF挑战=否`，与 Cloudflare、CSRF 或 DoH 无关，
-最符合“缺少原版的 App Attest / DeviceCheck / mTLS 设备证书”。当前复刻即使把 JSON、`client_id` 和响应字段全部对齐，
-也不能在一个不同 Bundle ID、不同签名团队的 iOS 16 应用里生成原版服务器认可的设备证明。Apple 的 App Attest 设计本身就是让服务器验证 App 身份和一次性挑战，[官方说明](https://developer.apple.com/documentation/devicecheck/establishing-your-app-s-integrity)。
+待完成授权的私钥、nonce 与 device_code 存在仅限本机的钥匙串记录中，30 分钟后作废，完成后删除。
 
-当前日志说明 DoH 链路已经正常：`GET /latest.json → 200`，认证接口也到达论坛应用层；继续安装证书、切换代理或调整 CSRF 不会解决这个 403。
-可行的登录路线是导入完整浏览器会话 Cookie，或在原版签名环境中完成设备授权后复用其会话。仅凭当前 IPA 和 iOS 16 重写工程无法独立复刻这套设备证明。
+## 设备码 403 的根因（已更正）
+
+早期把 `403 invalid_access` 归因为「缺少原版 App Attest / DeviceCheck / mTLS 设备证明」，
+这个结论是错的。真实原因有两条，都与设备证明无关：
+
+- **端点打错**：发往 `POST /login/device/code` 和 `/login/oauth/access_token`，
+  linux.do 上并不存在这两个路由。原版显示的 `https://linux.do/login/device`
+  会 302 到 `/user-api-key/activate`，命中的是 Discourse 内置页面。
+- **请求形状不对**：`ensure_json_request!` 在 Content-Type 或 Accept 不是 JSON 时
+  直接抛 `Discourse::InvalidAccess`，落到 API 上正是 `403 + error_type=invalid_access`。
+
+原版 IPA 里的 `AttestationService`、`/attest/challenge`、`X-App-Attest-Assertion`
+等符号属于它的其他模块，与 user API Key 设备授权这条链路无关。
+浏览器抓包已确认：原版只申请 `notifications` 与 `session_info`，服务端走标准 user-api-key 流程。
 
 ## 原生登录 403 的诊断
 

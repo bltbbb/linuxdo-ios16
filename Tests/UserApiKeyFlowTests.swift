@@ -3,48 +3,142 @@ import Security
 @testable import LinuxDoClient
 
 final class UserApiKeyFlowTests: XCTestCase {
-    func testOriginalDeviceTokenFieldsAreDecoded() throws {
-        let data = Data(#"""
-        {
-          "sessionCookie": "_t=会话值",
-          "registrationToken": "注册令牌",
-          "username": "user",
-          "name": "用户",
-          "registrationRequired": false,
-          "retryAfter": 7,
-          "identityToken": "identity",
-          "authorizationCode": "authorization",
-          "nonce": "nonce"
-        }
-        """#.utf8)
-        let response = try JSONDecoder().decode(DeviceTokenResponse.self, from: data)
-        XCTAssertEqual(response.sessionCookie, "_t=会话值")
-        XCTAssertEqual(response.registrationToken, "注册令牌")
-        XCTAssertEqual(response.retryAfter, 7)
-        XCTAssertEqual(response.identityToken, "identity")
-        XCTAssertEqual(response.authorizationCode, "authorization")
-        XCTAssertFalse(response.registrationRequired ?? true)
-    }
+    // MARK: - 设备授权协议
 
-    func testOriginalDeviceCodeAliasesAreDecoded() throws {
+    /// 站点真实返回形状（取自 POST /user-api-key/device.json）。
+    func testDeviceCodeResponseDecodesUpstreamShape() throws {
         let data = Data(#"""
         {
-          "deviceCode": "device",
-          "userCode": "ABCD",
-          "verificationURL": "https://example.com/activate",
-          "expiresAt": "2099-01-01T00:00:00Z",
-          "interval": 4,
-          "client_id": "org.linuxdo.community",
-          "registration_token": "registration"
+          "device_code": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "user_code": "V3X5-NJHL",
+          "verification_uri": "https://linux.do/user-api-key/activate",
+          "verification_uri_with_request": "https://linux.do/user-api-key/activate?request=tok",
+          "expires_in": 600,
+          "interval": 5
         }
         """#.utf8)
         let response = try JSONDecoder().decode(DeviceCodeResponse.self, from: data)
-        XCTAssertEqual(response.deviceCode, "device")
-        XCTAssertEqual(response.userCode, "ABCD")
-        XCTAssertEqual(response.verificationUri, "https://example.com/activate")
-        XCTAssertEqual(response.interval, 4)
-        XCTAssertEqual(response.clientId, "org.linuxdo.community")
-        XCTAssertEqual(response.registrationToken, "registration")
+        XCTAssertEqual(response.userCode, "V3X5-NJHL")
+        XCTAssertEqual(response.expiresIn, 600)
+        XCTAssertEqual(response.interval, 5)
+        XCTAssertTrue(response.isUsable)
+        XCTAssertEqual(
+            response.activationURL?.absoluteString,
+            "https://linux.do/user-api-key/activate?request=tok"
+        )
+    }
+
+    /// 缺 verification_uri_with_request 时退回 verification_uri，其余字段走默认值。
+    func testActivationURLFallsBackToBareVerificationURI() throws {
+        let data = Data(#"""
+        {
+          "device_code": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "user_code": "V3X5-NJHL",
+          "verification_uri": "https://linux.do/user-api-key/activate"
+        }
+        """#.utf8)
+        let response = try JSONDecoder().decode(DeviceCodeResponse.self, from: data)
+        XCTAssertNil(response.verificationUriWithRequest)
+        XCTAssertEqual(
+            response.activationURL?.absoluteString,
+            "https://linux.do/user-api-key/activate"
+        )
+        XCTAssertEqual(response.expiresIn, 600)
+        XCTAssertEqual(response.interval, 5)
+    }
+
+    /// device_code 必须是 64 位十六进制，形状不对不应拿去做轮询。
+    func testShortDeviceCodeIsNotUsable() throws {
+        let data = Data(#"""
+        {"device_code": "short", "user_code": "V3X5-NJHL"}
+        """#.utf8)
+        let response = try JSONDecoder().decode(DeviceCodeResponse.self, from: data)
+        XCTAssertFalse(response.isUsable)
+    }
+
+    /// 轮询只有四种状态，且只有 authorized 带 payload。
+    func testPollResponseDecodesAllStatuses() throws {
+        let pending = try JSONDecoder().decode(
+            DevicePollResponse.self,
+            from: Data(#"{"status":"authorization_pending"}"#.utf8)
+        )
+        XCTAssertEqual(pending.status, .authorizationPending)
+        XCTAssertTrue(pending.isPending)
+        XCTAssertNil(pending.payload)
+
+        let denied = try JSONDecoder().decode(
+            DevicePollResponse.self,
+            from: Data(#"{"status":"access_denied"}"#.utf8)
+        )
+        XCTAssertEqual(denied.status, .accessDenied)
+
+        let expired = try JSONDecoder().decode(
+            DevicePollResponse.self,
+            from: Data(#"{"status":"expired_token"}"#.utf8)
+        )
+        XCTAssertEqual(expired.status, .expiredToken)
+
+        let authorized = try JSONDecoder().decode(
+            DevicePollResponse.self,
+            from: Data(#"{"status":"authorized","payload":"cGF5bG9hZA=="}"#.utf8)
+        )
+        XCTAssertEqual(authorized.status, .authorized)
+        XCTAssertFalse(authorized.isPending)
+        XCTAssertEqual(authorized.payload, "cGF5bG9hZA==")
+    }
+
+    /// 未知状态必须报错，不能静默当成成功。
+    func testUnknownPollStatusThrows() {
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            DevicePollResponse.self,
+            from: Data(#"{"status":"something_new"}"#.utf8)
+        ))
+    }
+
+    /// scope 必须是最小集：多要一个站点不认的 scope 会让整个请求 403。
+    func testDeviceAuthScopesStayMinimal() {
+        XCTAssertEqual(DeviceAuthConfig.scopes, ["notifications", "session_info"])
+        XCTAssertFalse(DeviceAuthConfig.scopes.contains("write"))
+        XCTAssertEqual(DeviceAuthConfig.applicationName, "LINUX DO iOS")
+        XCTAssertFalse(DeviceAuthConfig.clientId.isEmpty)
+    }
+
+    /// 授权后拿到的 payload 必须能用同一把私钥解开。
+    func testAuthorizedPayloadDecryptsWithDevicePrivateKey() throws {
+        let material = try XCTUnwrap(RSAKeyPair.generate())
+        let encrypted = try encrypt(material, object: ["key": "测试密钥", "nonce": "正确随机值"])
+        let poll = try JSONDecoder().decode(
+            DevicePollResponse.self,
+            from: try JSONSerialization.data(withJSONObject: [
+                "status": "authorized",
+                "payload": encrypted
+            ])
+        )
+        let payload = try UserApiKeyAuthorization.decodePayload(
+            try XCTUnwrap(poll.payload),
+            expectedNonce: "正确随机值",
+            privateKey: material.privateKey
+        )
+        XCTAssertEqual(payload.key, "测试密钥")
+        XCTAssertThrowsError(try UserApiKeyAuthorization.decodePayload(
+            encrypted,
+            expectedNonce: "另一授权",
+            privateKey: material.privateKey
+        ))
+    }
+
+    /// 用公钥加密 payload，模拟站点加密授权结果。
+    private func encrypt(
+        _ material: RSAKeyPair.Material,
+        object: [String: String]
+    ) throws -> String {
+        let publicKey = try XCTUnwrap(SecKeyCopyPublicKey(material.privateKey))
+        let data = try JSONSerialization.data(withJSONObject: object)
+        var error: Unmanaged<CFError>?
+        let encrypted = try XCTUnwrap(
+            SecKeyCreateEncryptedData(publicKey, .rsaEncryptionPKCS1, data as CFData, &error)
+        ) as Data
+        return encrypted.base64EncodedString()
     }
 
     func testComputerAuthorizationHasNoRedirect() throws {

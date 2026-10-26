@@ -135,7 +135,7 @@ struct NetworkSettingsView: View {
                         Label("测试设备码登录", systemImage: "number.square")
                     }
                     if let code = auth.deviceCode {
-                        Text("user_code：\(code.userCode)\n验证地址：\(code.verificationUriComplete ?? code.verificationUri)")
+                        Text("授权码：\(code.userCode)\n验证地址：\(code.activationURL?.absoluteString ?? code.verificationUri)")
                             .font(.caption.monospaced())
                             .textSelection(.enabled)
                     }
