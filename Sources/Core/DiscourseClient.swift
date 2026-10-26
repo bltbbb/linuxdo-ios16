@@ -29,6 +29,7 @@ final class ProtocolCollector: NSObject, URLSessionTaskDelegate {
         lock.unlock()
     }
 }
+
 enum DiscourseError: LocalizedError {
     case badURL
     case http(Int, String)
@@ -36,6 +37,8 @@ enum DiscourseError: LocalizedError {
     case transport(String)
     case unauthorized
     case cloudflare
+    /// 429：被 Cloudflare 或站点限流。必须退避，继续重试只会把窗口越拉越长。
+    case rateLimited
 
     var errorDescription: String? {
         switch self {
@@ -51,6 +54,8 @@ enum DiscourseError: LocalizedError {
             return "未登录或会话已过期"
         case .cloudflare:
             return "被 Cloudflare 拦截，请稍后重试"
+        case .rateLimited:
+            return "请求过于频繁被限流，请等几分钟再试"
         }
     }
 }
@@ -335,6 +340,11 @@ final class DiscourseClient {
                 ? AuthResponseDiagnostics.summary(request: req, response: http, data: data, cookieNames: cookieNames)
                 : Self.message(from: data)
         )
+        // 429 与普通挑战分开：它是限流，重试只会把窗口拉得更长，
+        // 调用方必须长退避而不是立刻重来。
+        if http.statusCode == 429 {
+            throw DiscourseError.rateLimited
+        }
         if AuthResponseDiagnostics.isCloudflareChallenge(http) {
             throw DiscourseError.cloudflare
         }

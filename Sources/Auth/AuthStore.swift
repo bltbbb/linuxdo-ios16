@@ -218,7 +218,10 @@ final class AuthStore: ObservableObject {
         pollTask = Task { [weak self] in
             guard let self = self else { return }
             let deadline = Date().addingTimeInterval(TimeInterval(max(code.expiresIn, 60)))
-            let interval = TimeInterval(max(code.interval, 3))
+            // 轮询间隔不低于 6 秒：站点对 poll 有服务端限流，
+            // 间隔太密会直接换来 429，反而拖长整体授权时间。
+            var interval = TimeInterval(max(code.interval, 6))
+            var rateLimitedCount = 0
 
             while !Task.isCancelled, Date() < deadline {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
@@ -228,6 +231,7 @@ final class AuthStore: ObservableObject {
                     let poll = try await self.client.pollDeviceAuthorization(
                         deviceCode: code.deviceCode
                     )
+                    rateLimitedCount = 0
                     switch poll.status {
                     case .authorizationPending:
                         continue
@@ -241,6 +245,17 @@ final class AuthStore: ObservableObject {
                         await self.failDeviceLogin("授权码已过期，请重新开始")
                         return
                     }
+                } catch DiscourseError.rateLimited {
+                    // 被限流就明显放慢，别把窗口越拉越长。
+                    rateLimitedCount += 1
+                    if rateLimitedCount >= 4 {
+                        await self.failDeviceLogin(
+                            "请求过于频繁被限流，已停止轮询。请等几分钟后重新发起授权。"
+                        )
+                        return
+                    }
+                    interval = min(interval * 2, 30)
+                    continue
                 } catch {
                     // 单次网络抖动不该终止整轮授权，继续轮询到截止时间。
                     continue
@@ -306,13 +321,24 @@ final class AuthStore: ObservableObject {
     ///
     /// 只要 key 已经落盘，这里失败只是界面显示不出用户名，
     /// 下一次下拉刷新或重启会再试，不该把用户踢回登录页。
+    /// 取当前用户，失败重试。
+    ///
+    /// 只要 key 已经落盘，这里失败只是界面显示不出用户名，
+    /// 下一次下拉刷新或重启会再试，不该把用户踢回登录页。
+    ///
+    /// 429 单独处理：那是限流，立刻重试只会把窗口越拉越长，
+    /// 所以遇到它直接放弃本轮，交给用户稍后刷新。
     private func loadCurrentUserWithRetry(attempts: Int = 3) async {
         for attempt in 1...attempts {
             do {
                 if let user = try await client.currentUser() {
                     currentUser = user
+                    errorMessage = nil
                     return
                 }
+            } catch DiscourseError.rateLimited {
+                errorMessage = "已登录，但请求过于频繁被限流，过几分钟下拉刷新即可"
+                return
             } catch {
                 if attempt == attempts {
                     errorMessage = "已登录，但暂时取不到用户信息（可稍后下拉刷新）：\(error.localizedDescription)"
@@ -323,7 +349,6 @@ final class AuthStore: ObservableObject {
             }
         }
     }
-
     private func failDeviceLogin(_ message: String) async {
         pollTask?.cancel()
         pollTask = nil
