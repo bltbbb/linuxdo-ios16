@@ -573,6 +573,31 @@ final class DiscourseClient {
         try await get("/t/\(id).json", as: TopicDetailResponse.self)
     }
 
+    /// 点赞。Discourse 的通用动作接口：POST /post_actions.json
+    @discardableResult
+    func like(postId: Int) async throws -> Data {
+        try await postForm("/post_actions.json", fields: [
+            "id": String(postId),
+            "post_action_type_id": "2",
+            "flag_topic": "false"
+        ])
+    }
+
+    /// 取消点赞。DELETE /post_actions/:id，:id 是动作记录 id 而非帖子 id。
+    @discardableResult
+    func unlike(postActionId: Int) async throws -> Data {
+        guard let url = makeURL("/post_actions/\(postActionId).json") else {
+            throw DiscourseError.badURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        decorate(&req)
+        req.setValue(try await csrfToken(), forHTTPHeaderField: "X-CSRF-Token")
+        let (data, http) = try await send(req)
+        if http.statusCode >= 400 { throw DiscourseError.http(http.statusCode, Self.message(from: data)) }
+        return data
+    }
+
     /// 站点分类列表。
     func categories() async throws -> [Category] {
         let response = try await get("/categories.json", as: CategoryListResponse.self)

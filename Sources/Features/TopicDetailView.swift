@@ -71,6 +71,9 @@ struct TopicDetailView: View {
 
     @StateObject private var viewModel: TopicDetailViewModel
     @State private var heights: [Int: CGFloat] = [:]
+    @State private var likedPostIds: Set<Int> = []
+    @State private var likingPostIds: Set<Int> = []
+    @State private var actionError: String?
 
     init(topic: TopicSummary) {
         _viewModel = StateObject(
@@ -121,6 +124,14 @@ struct TopicDetailView: View {
                     .multilineTextAlignment(.center)
                     .padding(24)
             }
+        }
+        .alert("操作失败", isPresented: Binding(
+            get: { actionError != nil },
+            set: { if !$0 { actionError = nil } }
+        )) {
+            Button("好", role: .cancel) { actionError = nil }
+        } message: {
+            Text(actionError ?? "")
         }
     }
 
@@ -183,9 +194,43 @@ struct TopicDetailView: View {
             )
             .frame(height: heights[post.id] ?? 120)
 
+            HStack(spacing: 16) {
+                Button {
+                    Task { await like(post) }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: isLiked(post) ? "heart.fill" : "heart")
+                        Text("\(post.displayLikeCount)")
+                    }
+                    .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(isLiked(post) ? .red : .secondary)
+                .disabled(isLiked(post) || likingPostIds.contains(post.id))
+
+                Spacer()
+            }
+            .padding(.top, 2)
+
             Divider()
         }
         .padding(.vertical, 8)
+    }
+
+    private func isLiked(_ post: Post) -> Bool {
+        post.isLiked || likedPostIds.contains(post.id)
+    }
+
+    private func like(_ post: Post) async {
+        guard !isLiked(post), !likingPostIds.contains(post.id) else { return }
+        likingPostIds.insert(post.id)
+        defer { likingPostIds.remove(post.id) }
+        do {
+            try await DiscourseClient.shared.like(postId: post.id)
+            likedPostIds.insert(post.id)
+        } catch {
+            actionError = error.localizedDescription
+        }
     }
 
     private func displayName(_ post: Post) -> String {

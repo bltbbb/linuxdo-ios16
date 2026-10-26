@@ -118,12 +118,25 @@ struct Post: Codable, Identifiable, Hashable {
     let createdAt: String?
     let postNumber: Int
     let avatarTemplate: String?
+    let likeCount: Int?
+    let actionsSummary: [PostActionSummary]?
 
     enum CodingKeys: String, CodingKey {
         case id, username, name, cooked
         case createdAt = "created_at"
         case postNumber = "post_number"
         case avatarTemplate = "avatar_template"
+        case likeCount = "like_count"
+        case actionsSummary = "actions_summary"
+    }
+
+    /// 点赞状态：actions_summary 里 id == 2 表示点赞。
+    var isLiked: Bool {
+        actionsSummary?.first(where: { $0.id == 2 })?.acted == true
+    }
+
+    var displayLikeCount: Int {
+        likeCount ?? actionsSummary?.first(where: { $0.id == 2 })?.count ?? 0
     }
 
     func avatarURL(size: Int = 72) -> URL? {
@@ -227,4 +240,11 @@ struct Category: Codable, Identifiable, Hashable {
 /// /search.json 的响应：只取主题列表，足够列表展示。
 struct SearchResponse: Decodable {
     let topics: [TopicSummary]?
+}
+
+/// 帖子的可执行动作。Discourse 用 id == 2 表示「点赞」。
+struct PostActionSummary: Codable, Hashable {
+    let id: Int
+    let count: Int?
+    let acted: Bool?
 }
