@@ -295,7 +295,7 @@ final class DiscourseClient {
                         : Self.message(from: direct.0)
                 )
 
-                if AuthResponseDiagnostics.isCloudflareChallenge(direct.1) {
+                if AuthResponseDiagnostics.isCloudflareChallenge(direct.1, body: direct.0) {
                     // 直连被 Cloudflare 挑战：本机网络需要浏览器校验，直连这条路走不通。
                     // 不要直接失败——回退到 URLSession，有梯子时那边是通的。
                     directBox.markFailed()
@@ -308,6 +308,16 @@ final class DiscourseClient {
                     )
                 } else {
                     directBox.markSucceeded()
+                    // DoH 直连此前在这里提前返回，绕过了下方 URLSession 分支的
+                    // 403 无 API Key 重试；scope 不含 read 时，公开主题接口因此一直 403。
+                    if direct.1.statusCode == 403,
+                       allowKeyFallback,
+                       req.value(forHTTPHeaderField: "User-Api-Key") != nil,
+                       (req.httpMethod == "GET" || req.httpMethod == "HEAD") {
+                        var publicReq = req
+                        publicReq.setValue(nil, forHTTPHeaderField: "User-Api-Key")
+                        return try await send(publicReq, allowKeyFallback: false)
+                    }
                     return direct
                 }
             } catch {
@@ -352,7 +362,7 @@ final class DiscourseClient {
         if http.statusCode == 429 {
             throw DiscourseError.rateLimited
         }
-        if AuthResponseDiagnostics.isCloudflareChallenge(http) {
+        if AuthResponseDiagnostics.isCloudflareChallenge(http, body: data) {
             throw DiscourseError.cloudflare
         }
         // 403 且不是 Cloudflare 挑战、且请求带了 key：说明是 scope 不足被站点拒绝。
@@ -362,7 +372,7 @@ final class DiscourseClient {
            allowKeyFallback,
            req.value(forHTTPHeaderField: "User-Api-Key") != nil,
            req.httpMethod == "GET",
-           !AuthResponseDiagnostics.isCloudflareChallenge(http) {
+           !AuthResponseDiagnostics.isCloudflareChallenge(http, body: data) {
             var publicReq = req
             publicReq.setValue(nil, forHTTPHeaderField: "User-Api-Key")
             return try await send(publicReq, allowKeyFallback: false)

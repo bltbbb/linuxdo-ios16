@@ -31,7 +31,7 @@ enum AuthResponseDiagnostics {
         let text = String(data: data.prefix(512), encoding: .utf8) ?? ""
         var fields = [
             "响应类型=\(response.mimeType ?? "未知")",
-            "CF挑战=\(isCloudflareChallenge(response) ? "是" : "否")",
+            "CF挑战=\(isCloudflareChallenge(response, body: data) ? "是" : "否")",
             "CSRF头=\(request.value(forHTTPHeaderField: "X-CSRF-Token") == nil ? "无" : "有")",
             "来源头=\(request.value(forHTTPHeaderField: "Origin") == nil ? "无" : "有")",
             "Cookie名=\(cookieNames.sorted().joined(separator: ","))"
@@ -43,8 +43,14 @@ enum AuthResponseDiagnostics {
         if text.uppercased().contains("BAD CSRF") {
             fields.append("CSRF校验失败")
         }
-        if object?["error"] != nil || object?["errors"] != nil {
-            fields.append("含站点错误信息")
+        // 站点自己的报错文案是定位 403 的唯一线索，必须原样带出来。
+        // 这里只取错误描述，不涉及任何凭据值。
+        if let error = object?["error"] as? String, !error.isEmpty {
+            fields.append("站点消息=\(error.prefix(120))")
+        } else if let errors = object?["errors"] as? [String], !errors.isEmpty {
+            fields.append("站点消息=\(errors.joined(separator: " / ").prefix(160))")
+        } else if object == nil, !text.isEmpty {
+            fields.append("正文=\(text.prefix(100))")
         }
         return fields.joined(separator: "；")
     }

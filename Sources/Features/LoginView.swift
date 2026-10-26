@@ -27,7 +27,6 @@ struct LoginView: View {
     @State private var showingBypass = false
     @State private var codeIssuedAt: Date?
 
-    @State private var showingWebLogin = false
     @FocusState private var focused: Field?
 
     var body: some View {
@@ -44,9 +43,8 @@ struct LoginView: View {
                     }
                 }
 
-                browserSection
-
                 deviceSection
+
 
                 if let message = auth.errorMessage {
                     Section {
@@ -87,12 +85,8 @@ struct LoginView: View {
                 CloudflareBypassView {
                     Task { await auth.beginDeviceLogin() }
                 }
-            }
-            .sheet(isPresented: $showingWebLogin) {
-                WebLoginView()
-                    .environmentObject(auth)
-            }
         }
+    }
     }
 
     /// 本地是否已有 Cloudflare 放行凭据。
@@ -101,34 +95,6 @@ struct LoginView: View {
     private var hasClearance: Bool {
         (HTTPCookieStorage.shared.cookies ?? []).contains { $0.name == "cf_clearance" }
     }
-    // MARK: - 浏览器登录（推荐）
-
-    /// 用 WKWebView 打开真实站点完成登录，拿到完整会话 cookie。
-    ///
-    /// 这是原版读列表的方式。User API Key 只申请得到
-    /// `notifications` + `session_info` 两项，读不了帖子内容；
-    /// 已读/未读、收藏、点赞状态都依赖浏览器会话（`_t`）。
-    ///
-    /// 前提：WebView 走系统网络栈，不开梯子连不上 linux.do。
-    private var browserSection: some View {
-        Section {
-            Button {
-                focused = nil
-                showingWebLogin = true
-            } label: {
-                HStack {
-                    Spacer()
-                    Label("用浏览器登录", systemImage: "safari.fill").bold()
-                    Spacer()
-                }
-            }
-        } header: {
-            Text("登录")
-        } footer: {
-            Text("在 App 内打开 linux.do 完成登录。列表的已读/未读、收藏、点赞这些身份相关状态都依赖它，需要梯子。\n\n设备授权只能拿到通知权限的密钥，读不到帖子内容。")
-        }
-    }
-
     // MARK: - 设备授权（主路径）
 
     private var deviceSection: some View {
@@ -226,7 +192,7 @@ struct LoginView: View {
         }
     }
 
-    // MARK: - 兜底：Cookie
+    // MARK: - 会话 Cookie（唯一能拿到登录态的方式）
 
     private var cookieSection: some View {
         Section {
@@ -256,9 +222,9 @@ struct LoginView: View {
                     || cookieInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             )
         } header: {
-            Text("用 Cookie 登录")
+            Text("登录（会话 Cookie）")
         } footer: {
-            Text("设备授权不可用时的退路：电脑浏览器登录 linux.do → F12 → Application → Cookies → 复制 _t 的值。")
+            Text("这是唯一能拿到登录态的方式。已读/未读、收藏、点赞都依赖它。\n\n电脑浏览器登录 linux.do → F12 → Application → Cookies → https://linux.do → 复制 _t 的值贴到上面。\n\n设备授权拿到的密钥只能读通知，读不了帖子内容——站点不放行 read 权限。")
         }
     }
 

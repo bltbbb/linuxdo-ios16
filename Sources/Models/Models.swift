@@ -81,6 +81,38 @@ struct TopicSummary: Codable, Identifiable, Hashable {
     }
 }
 
+/// `GET /u/:username/topic-tracking-state.json` 的一条记录。
+///
+/// 这是登录态的唯一来源：`session_info` scope 只开放两个端点
+/// （`session#current` 和 `users#topic_tracking_state`），
+/// 列表本身以游客身份读，已读/未读由这里补齐。
+/// 原版能做「登录后列表变成登录态」，靠的就是这一步。
+struct TopicTrackingState: Decodable, Hashable {
+    let topicId: Int
+    let highestPostNumber: Int?
+    let lastReadPostNumber: Int?
+    let notificationLevel: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case topicId = "topic_id"
+        case highestPostNumber = "highest_post_number"
+        case lastReadPostNumber = "last_read_post_number"
+        case notificationLevel = "notification_level"
+    }
+
+    /// 已读完：最后读到的楼层不小于最新楼层。
+    var isFullyRead: Bool {
+        guard let read = lastReadPostNumber, let highest = highestPostNumber else { return false }
+        return read >= highest
+    }
+
+    /// 有未读：读过但没读完，或者一次都没读过但已有新帖。
+    var isUnread: Bool {
+        guard let read = lastReadPostNumber, let highest = highestPostNumber else { return false }
+        return read < highest
+    }
+}
+
 // MARK: - 主题详情
 
 struct TopicDetailResponse: Decodable {
