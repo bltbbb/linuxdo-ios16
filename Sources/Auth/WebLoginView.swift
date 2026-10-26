@@ -1,9 +1,26 @@
 import SwiftUI
 import WebKit
 
-/// 可靠的登录路径：用 WKWebView 打开真实登录页。
-/// 它能执行 Cloudflare 的挑战 JS、拿到 `cf_clearance` 与 `_t`，
-/// 再把 cookie 灌进 `HTTPCookieStorage`，供 URLSession 复用。
+/// 与站点交互的 WebView。两种用途：
+/// - `.login`：用户在里面完成登录，需要拿到 `_t` 会话
+/// - `.cloudflareBypass`：只需要 Cloudflare 放行，拿到 `cf_clearance` 即可
+///
+/// 原版 App 就是这么做的：链接了 WebKit，`cf_clearance` 字符串一次都不出现，
+/// 因为它不显式处理——WKWebView 是真浏览器，挑战 JS 自己会跑完，
+/// 随后把整袋 cookie 交给原生请求。见 `CommunityWebSession.swift`。
+enum WebSessionPurpose {
+    case login
+    case cloudflareBypass
+
+    /// 判定「这一轮可以收工」的 cookie。
+    var requiredCookie: String {
+        switch self {
+        case .login: return "_t"
+        case .cloudflareBypass: return "cf_clearance"
+        }
+    }
+}
+
 struct WebLoginView: View {
 
     @Environment(\.dismiss) private var dismiss
@@ -53,8 +70,9 @@ struct WebLoginView: View {
 
 struct WebLoginWebView: UIViewRepresentable {
 
+    var purpose: WebSessionPurpose = .login
     @Binding var isLoading: Bool
-    var onLoggedIn: () -> Void
+    var onReady: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -64,9 +82,15 @@ struct WebLoginWebView: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        // 关键：WebView 与原生请求必须用同一个 UA。
+        // cf_clearance 与 User-Agent 绑定，UA 不一致时过盾拿到的凭据对原生请求无效。
+        webView.customUserAgent = AppConfig.userAgent
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
-        webView.load(URLRequest(url: AppConfig.baseURL.appendingPathComponent("login")))
+        let url = purpose == .login
+            ? AppConfig.baseURL.appendingPathComponent("login")
+            : AppConfig.baseURL
+        webView.load(URLRequest(url: url))
         return webView
     }
 
@@ -104,13 +128,19 @@ struct WebLoginWebView: UIViewRepresentable {
             parent.isLoading = false
         }
 
-        /// 登录成功后 `_t` 会话 cookie 存在，此时把 linux.do 相关 cookie 全部同步给 URLSession。
+        /// 把 linux.do 相关 cookie 同步给 URLSession。
+        ///
+        /// 这里刻意不要求 `_t`：Cloudflare 过盾只产生 `cf_clearance`，
+        /// 用户此时并未登录。早先以 `_t` 为门槛，导致过盾结果永远进不了
+        /// `HTTPCookieStorage`，原生请求一直被挑战。
         private func harvestCookies(from webView: WKWebView) {
             guard !notified else { return }
             webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
                 guard let self = self else { return }
                 let relevant = cookies.filter { $0.domain.contains("linux.do") }
-                guard relevant.contains(where: { $0.name == "_t" }) else { return }
+                guard relevant.contains(where: { $0.name == self.parent.purpose.requiredCookie }) else {
+                    return
+                }
 
                 for cookie in relevant {
                     HTTPCookieStorage.shared.setCookie(cookie)
@@ -118,7 +148,7 @@ struct WebLoginWebView: UIViewRepresentable {
 
                 self.notified = true
                 DispatchQueue.main.async {
-                    self.parent.onLoggedIn()
+                    self.parent.onReady()
                 }
             }
         }

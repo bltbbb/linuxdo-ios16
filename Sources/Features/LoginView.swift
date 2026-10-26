@@ -22,6 +22,9 @@ struct LoginView: View {
     @State private var code = ""
     @State private var encryptedResult = ""
     /// 授权码生成时刻，用于倒计时。由 onChange 跟随 auth.deviceCode 维护。
+    /// 是否需要在出码前先过一次 Cloudflare 盾。
+    /// 手上已有 cf_clearance 时直接出码，避免每次都弹验证页。
+    @State private var showingBypass = false
     @State private var codeIssuedAt: Date?
 
     @FocusState private var focused: Field?
@@ -49,6 +52,12 @@ struct LoginView: View {
                             .monospaced()
                             .foregroundColor(.red)
                             .textSelection(.enabled)
+                        Button {
+                            showingBypass = true
+                        } label: {
+                            Label("重新过安全验证", systemImage: "arrow.clockwise.shield")
+                        }
+                        .disabled(auth.isBusy)
                     } header: {
                         Text("错误详情（可长按复制）")
                     }
@@ -71,9 +80,20 @@ struct LoginView: View {
             .onChange(of: auth.deviceCode?.deviceCode) { _ in
                 codeIssuedAt = auth.deviceCode == nil ? nil : Date()
             }
+            .sheet(isPresented: $showingBypass) {
+                CloudflareBypassView {
+                    Task { await auth.beginDeviceLogin() }
+                }
+            }
         }
     }
 
+    /// 本地是否已有 Cloudflare 放行凭据。
+    /// 只判断存在性：是否仍有效只有真发一次请求才知道，
+    /// 过期时下面的「重新过安全验证」可以重来。
+    private var hasClearance: Bool {
+        (HTTPCookieStorage.shared.cookies ?? []).contains { $0.name == "cf_clearance" }
+    }
     // MARK: - 设备授权（主路径）
 
     private var deviceSection: some View {
@@ -146,7 +166,11 @@ struct LoginView: View {
                     focused = nil
                     copiedCode = false
                     copiedLink = false
-                    Task { await auth.beginDeviceLogin() }
+                    if hasClearance {
+                        Task { await auth.beginDeviceLogin() }
+                    } else {
+                        showingBypass = true
+                    }
                 } label: {
                     HStack {
                         Spacer()
