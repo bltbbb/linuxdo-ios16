@@ -6,9 +6,6 @@ import SwiftUI
 /// 这是原版 App 的做法：它不显式处理 `cf_clearance`（二进制里该字符串一次不出现），
 /// 而是靠 WKWebView 是真浏览器这一点——挑战 JS 自己跑完，随后整袋 cookie 交给原生请求。
 /// 见原版符号 `CommunityWebSession.swift` / `WebBrowserWebView.swift`。
-///
-/// 过盾是一次性的：成功后 `cf_clearance` 会留在 cookie 存储里，
-/// 之后所有原生请求自动带上，用户下次只在凭据过期时才需要重走这里。
 struct CloudflareBypassView: View {
 
     @Environment(\.dismiss) private var dismiss
@@ -18,11 +15,18 @@ struct CloudflareBypassView: View {
 
     @State private var isLoading = true
     @State private var finished = false
+    /// WebView 回传的真实状态（URL / 标题 / 错误）。
+    /// 空白页时这是唯一能区分「没拿到页面」和「页面渲染不了」的证据。
+    @State private var detail: String?
 
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
-                WebLoginWebView(purpose: .cloudflareBypass, isLoading: $isLoading) {
+                WebLoginWebView(
+                    purpose: .cloudflareBypass,
+                    isLoading: $isLoading,
+                    onStatus: { detail = $0 }
+                ) {
                     guard !finished else { return }
                     finished = true
                     persistCookies()
@@ -31,8 +35,22 @@ struct CloudflareBypassView: View {
                 }
                 .ignoresSafeArea(edges: .bottom)
 
-                statusBar
-                    .padding(.top, 8)
+                VStack(spacing: 8) {
+                    statusBar
+                    if let text = detail {
+                        Text(text)
+                            .font(.caption2)
+                            .monospaced()
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.leading)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
             }
             .navigationTitle("安全验证")
             .navigationBarTitleDisplayMode(.inline)
@@ -41,8 +59,7 @@ struct CloudflareBypassView: View {
                     Button("取消") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    // 兜底：某些网络下挑战页不会产生 cf_clearance，
-                    // 允许用户跳过，让原生请求先试一次——不行再回来看。
+                    // 兜底：挑战页长时间不出结果时，允许先跳过让原生请求试一次。
                     Button("跳过") {
                         persistCookies()
                         onReady()

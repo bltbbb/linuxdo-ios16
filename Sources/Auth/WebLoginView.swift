@@ -72,6 +72,9 @@ struct WebLoginWebView: UIViewRepresentable {
 
     var purpose: WebSessionPurpose = .login
     @Binding var isLoading: Bool
+    /// 把 WebView 的真实状态回传出来。
+    /// 空白页时只有 URL / 标题 / 错误能说明到底是「没拿到页面」还是「拿到了但渲染不了」。
+    var onStatus: ((String) -> Void)?
     var onReady: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -109,15 +112,26 @@ struct WebLoginWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             parent.isLoading = true
+            parent.onStatus?("正在连接…")
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             parent.isLoading = false
+            let url = webView.url?.absoluteString ?? "无地址"
+            webView.evaluateJavaScript("document.title") { [weak self] title, _ in
+                guard let self = self else { return }
+                let name = (title as? String) ?? "（无标题）"
+                let blank = (name.isEmpty || name == "（无标题）")
+                self.parent.onStatus?(
+                    "已加载：\(url)\n标题：\(blank ? "空" : name)"
+                )
+            }
             harvestCookies(from: webView)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             parent.isLoading = false
+            parent.onStatus?("加载失败：\(error.localizedDescription)")
         }
 
         func webView(
@@ -126,6 +140,7 @@ struct WebLoginWebView: UIViewRepresentable {
             withError error: Error
         ) {
             parent.isLoading = false
+            parent.onStatus?("无法连接：\(error.localizedDescription)")
         }
 
         /// 把 linux.do 相关 cookie 同步给 URLSession。
