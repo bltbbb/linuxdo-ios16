@@ -266,18 +266,20 @@ final class AuthStore: ObservableObject {
             return
         }
 
+        // 第一步只做解密和落盘。
+        //
+        // payload 服务端只给一次，任何后续失败都不能让它白丢，
+        // 所以先把 key 存进钥匙串，再去做网络验证。
+        // 早先把 currentUser() 放在保存之前，一次 429 挑战就把刚拿到的密钥废了，
+        // 用户不得不重新授权。
         do {
             let result = try UserApiKeyAuthorization.decodePayload(
                 payload,
                 expectedNonce: pending.nonce,
                 privateKey: pending.material.privateKey
             )
-            client.setApiKey(result.key)
-            guard let user = try await client.currentUser() else {
-                throw DiscourseError.unauthorized
-            }
             try TokenStore.save(result.key)
-            currentUser = user
+            client.setApiKey(result.key)
             hasStoredSession = true
             deviceCode = nil
             needsSecondFactor = false
@@ -286,13 +288,39 @@ final class AuthStore: ObservableObject {
             rsaMaterial = nil
             pendingNonce = nil
         } catch {
-            deviceCode = nil
             PendingDeviceAuthorizationStore.clear()
             var message = "解密授权结果失败：\(error.localizedDescription)"
             if let diagnostics = await diagnosticsSuffix() {
                 message += "\n\n" + diagnostics
             }
             errorMessage = message
+            return
+        }
+
+        // 第二步：取用户信息。失败不影响已登录状态——
+        // Cloudflare 的 429 是临时的，重试几次通常就过。
+        await loadCurrentUserWithRetry()
+    }
+
+    /// 取当前用户，失败重试。
+    ///
+    /// 只要 key 已经落盘，这里失败只是界面显示不出用户名，
+    /// 下一次下拉刷新或重启会再试，不该把用户踢回登录页。
+    private func loadCurrentUserWithRetry(attempts: Int = 3) async {
+        for attempt in 1...attempts {
+            do {
+                if let user = try await client.currentUser() {
+                    currentUser = user
+                    return
+                }
+            } catch {
+                if attempt == attempts {
+                    errorMessage = "已登录，但暂时取不到用户信息（可稍后下拉刷新）：\(error.localizedDescription)"
+                }
+            }
+            if attempt < attempts {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
         }
     }
 
