@@ -55,9 +55,9 @@ jobs:
           cd rust-src
           # 只用 staticlib：iOS 不接受这个 crate 默认的 cdylib 产出
           cargo rustc --release --locked --target aarch64-apple-ios --features ech --lib --crate-type staticlib
-          mkdir -p ../rust/lib
-          cp target/aarch64-apple-ios/release/libdoh_proxy.a ../rust/lib/
-          ls -lh ../rust/lib
+          mkdir -p ../rust/lib/device
+          cp target/aarch64-apple-ios/release/libdoh_proxy.a ../rust/lib/device/
+          ls -lh ../rust/lib/device
 
       - name: Generate Xcode project
         run: |

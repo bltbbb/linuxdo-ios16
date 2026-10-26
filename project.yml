@@ -29,8 +29,11 @@ targets:
         CURRENT_PROJECT_VERSION: "141"
         # DoH + ECH 本地代理：fluxdo_doh（GPL-3.0）交叉编译出的 Rust 静态库，CI 里构建
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/Sources/Support/DohProxyBridge.h"
-        LIBRARY_SEARCH_PATHS:
-          - "$(SRCROOT)/rust/lib"
+        # 真机与模拟器各用各的切片：静态库两者都是 arm64，无法合成通用包
+        "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]":
+          - "$(SRCROOT)/rust/lib/device"
+        "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]":
+          - "$(SRCROOT)/rust/lib/sim"
         OTHER_LDFLAGS:
           - "-ldoh_proxy"
           - "-lc++"

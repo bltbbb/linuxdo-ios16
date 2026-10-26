@@ -49,12 +49,10 @@ jobs:
           for target in aarch64-apple-ios aarch64-apple-ios-sim; do
             cargo rustc --release --locked --target "$target" --features ech --lib --crate-type staticlib
           done
-          mkdir -p ../rust/lib
-          lipo -create \
-            target/aarch64-apple-ios/release/libdoh_proxy.a \
-            target/aarch64-apple-ios-sim/release/libdoh_proxy.a \
-            -output ../rust/lib/libdoh_proxy.a
-          ls -lh ../rust/lib
+          mkdir -p ../rust/lib/device ../rust/lib/sim
+          cp target/aarch64-apple-ios/release/libdoh_proxy.a ../rust/lib/device/
+          cp target/aarch64-apple-ios-sim/release/libdoh_proxy.a ../rust/lib/sim/
+          ls -lh ../rust/lib/device ../rust/lib/sim
 
       - name: Generate Xcode project
         run: xcodegen generate
