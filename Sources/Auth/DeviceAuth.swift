@@ -16,10 +16,14 @@ import Security
 /// 历史上「站点禁用了设备授权」的判断就是被这个 403 误导的。
 enum DeviceAuthConfig {
 
-    /// 稳定的安装标识。站点按 client_id 记住公钥和 application_name，
-    /// 同一台设备重复授权必须复用同一个值，否则每次都要重新建党。
+    /// 稳定的安装标识。
+    ///
+    /// **换 scope 必须换 client_id。** 站点会把 client_id 绑定到首次注册时的
+    /// scope 集合（`RequestValidator.validate_client_scopes!`），
+    /// 之后请求超出该集合的范围会直接 403 invalid_access。
+    /// 早期版本用两项 scope 注册过同一个 client_id，所以这里升到 v2。
     static let clientId: String = {
-        let key = "device-auth-client-id"
+        let key = "device-auth-client-id-v2"
         if let saved = UserDefaults.standard.string(forKey: key), !saved.isEmpty {
             return saved
         }
@@ -33,14 +37,12 @@ enum DeviceAuthConfig {
 
     /// 申请的 scope。
     ///
-    /// 只能申请站点放行的两项。实测把 `read` 加进来会让创码请求直接
-    /// 403 `invalid_access`（CF挑战=否，是 Discourse 自己拒的），
-    /// `validate_params` 用 `UserApiKey.allowed_scopes.superset?` 做白名单校验。
+    /// 设备授权只禁用 `one_time_password`（源码 `DISALLOWED_DEVICE_SCOPES`），
+    /// `read` 是允许的。之前加 `read` 被 403，原因是同一个 client_id
+    /// 已被旧的两项 scope 绑定，不是站点拒绝这个 scope。
     ///
-    /// 因此这把 key **读不了帖子内容**，只能读通知和会话信息。
-    /// 这正是原版的结构：读列表靠浏览器会话 cookie（`_t`），
-    /// API key 只承担通知这类个人接口。
-    static let scopes = ["notifications", "session_info"]
+    /// `read` 决定能否以登录身份读列表——等级/用户组可见的帖子靠它。
+    static let scopes = ["read", "notifications", "session_info"]
 }
 
 // MARK: - 创建响应

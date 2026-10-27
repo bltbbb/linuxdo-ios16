@@ -96,12 +96,11 @@ final class UserApiKeyFlowTests: XCTestCase {
     }
 
     /// scope 必须是最小集：多要一个站点不认的 scope 会让整个请求 403。
-    func testDeviceAuthScopesStayMinimal() {
-        // 只能申请站点放行的两项。
-        // 实测加 read 会让创码请求直接 403 invalid_access，
-        // 因此这把 key 读不了帖子内容，登录态要靠浏览器会话 cookie。
-        XCTAssertEqual(DeviceAuthConfig.scopes, ["notifications", "session_info"])
-        XCTAssertFalse(DeviceAuthConfig.scopes.contains("read"))
+    func testDeviceAuthScopesIncludeRead() {
+        // 设备授权只禁用 one_time_password（DISALLOWED_DEVICE_SCOPES），
+        // read 是允许的；等级/用户组可见的帖子靠它才能以登录身份读到。
+        XCTAssertEqual(DeviceAuthConfig.scopes, ["read", "notifications", "session_info"])
+        XCTAssertFalse(DeviceAuthConfig.scopes.contains("one_time_password"))
         XCTAssertFalse(DeviceAuthConfig.scopes.contains("write"))
     }
 
